@@ -301,11 +301,6 @@ impl<'scope> Scope<'scope> {
             guard = self.job_completed_cvar.wait(guard).unwrap();
         }
 
-        // at this point, we should also have freed all HeapJob that we built
-        debug_assert!(self.leak_counter.load(Ordering::SeqCst) == 0,
-                      "{} spawned jobs leaked",
-                      self.leak_counter.load(Ordering::SeqCst));
-
         // propagate panic, if any occurred; at this point, all
         // outstanding jobs have completed, so we can use a relaxed
         // ordering:
@@ -379,7 +374,7 @@ impl<'scope, BODY> Job for HeapJob<'scope, BODY>
     where BODY: FnOnce(&Scope<'scope>) + 'scope
 {
     unsafe fn execute(this: *const Self, mode: JobMode) {
-        let this: Box<Self> = mem::transmute(this);
+        let this: &Self = mem::transmute(this); // FIXME
         let scope = &*this.scope;
 
         match mode {
@@ -408,6 +403,7 @@ impl<'scope, BODY> Drop for HeapJob<'scope, BODY>
     where BODY: FnOnce(&Scope<'scope>) + 'scope
 {
     fn drop(&mut self) {
+        println!("Foo");
         unsafe {
             (*self.scope).job_dropped();
         }

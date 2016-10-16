@@ -2,6 +2,8 @@ use {scope, Scope};
 use prelude::*;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
+mod leak;
+
 #[test]
 fn scope_empty() {
     scope(|_| { });
@@ -74,3 +76,17 @@ fn scope_mix() {
         });
     });
 }
+
+#[test]
+fn scope_leak_divide_and_conquer() {
+    let pool = leak::Pool::new();
+    scope(|s| {
+        let obj = pool.alloc();
+        s.spawn(move |_| {
+            // This is a move closure, so we will move `obj` into the
+            // closure environment.
+            obj.touch();
+        });
+    });
+}
+
