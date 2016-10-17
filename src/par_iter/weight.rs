@@ -78,9 +78,7 @@ pub struct WeightProducer<P> {
 }
 
 impl<P: Producer> Producer for WeightProducer<P> {
-    fn weighted(&self) -> bool {
-        true
-    }
+    type Splitter = CostSplitter;
 
     fn cost(&mut self, len: usize) -> f64 {
         self.base.cost(len) * self.weight
@@ -123,9 +121,7 @@ impl<C, ITEM> Consumer<ITEM> for WeightConsumer<C>
     type Reducer = C::Reducer;
     type Result = C::Result;
 
-    fn weighted(&self) -> bool {
-        true
-    }
+    type Splitter = CostSplitter;
 
     fn cost(&mut self, cost: f64) -> f64 {
         self.base.cost(cost) * self.weight

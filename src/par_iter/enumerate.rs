@@ -83,9 +83,7 @@ pub struct EnumerateProducer<P> {
 impl<P> Producer for EnumerateProducer<P>
     where P: Producer
 {
-    fn weighted(&self) -> bool {
-        self.base.weighted()
-    }
+    type Splitter = P::Splitter;
 
     fn cost(&mut self, items: usize) -> f64 {
         self.base.cost(items) // enumerating is basically free

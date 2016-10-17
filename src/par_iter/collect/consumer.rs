@@ -44,6 +44,8 @@ impl<'c, ITEM: Send> Consumer<ITEM> for CollectConsumer<'c, ITEM> {
     type Reducer = NoopReducer;
     type Result = ();
 
+    type Splitter = ThiefSplitter; // default
+
     fn cost(&mut self, cost: f64) -> f64 {
         cost * FUNC_ADJUSTMENT
     }

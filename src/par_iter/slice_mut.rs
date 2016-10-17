@@ -117,6 +117,8 @@ pub struct SliceMutProducer<'data, T: 'data + Send> {
 
 impl<'data, T: 'data + Send> Producer for SliceMutProducer<'data, T>
 {
+    type Splitter = ThiefSplitter; // default
+
     fn cost(&mut self, len: usize) -> f64 {
         len as f64
     }
@@ -142,6 +144,8 @@ pub struct SliceChunksMutProducer<'data, T: 'data + Send> {
 }
 
 impl<'data, T: 'data + Send> Producer for SliceChunksMutProducer<'data, T> {
+    type Splitter = ThiefSplitter; // default
+
     fn cost(&mut self, len: usize) -> f64 {
         len as f64
     }

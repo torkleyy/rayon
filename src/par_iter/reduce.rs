@@ -60,6 +60,8 @@ impl<'r, REDUCE_OP, ITEM> Consumer<ITEM> for ReduceConsumer<'r, REDUCE_OP>
     type Reducer = Self;
     type Result = ITEM;
 
+    type Splitter = ThiefSplitter; // default
+
     fn cost(&mut self, cost: f64) -> f64 {
         // This isn't quite right, as we will do more than O(n) reductions, but whatever.
         cost * FUNC_ADJUSTMENT

@@ -139,9 +139,7 @@ impl<A, B> ChainProducer<A, B>
 impl<A, B> Producer for ChainProducer<A, B>
     where A: Producer, B: Producer<Item=A::Item>
 {
-    fn weighted(&self) -> bool {
-        self.a.weighted() || self.b.weighted()
-    }
+    type Splitter = CostSplitter; // FIXME resolve A::Splitter ∪ B::Splitter
 
     fn cost(&mut self, len: usize) -> f64 {
         let a_len = min(self.a_len, len);

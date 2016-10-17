@@ -64,9 +64,7 @@ impl<'f, ITEM, C, FILTER_OP: 'f> Consumer<ITEM> for FilterConsumer<'f, C, FILTER
     type Reducer = C::Reducer;
     type Result = C::Result;
 
-    fn weighted(&self) -> bool {
-        self.base.weighted()
-    }
+    type Splitter = C::Splitter;
 
     /// Cost to process `items` number of items.
     fn cost(&mut self, cost: f64) -> f64 {

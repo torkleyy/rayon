@@ -54,6 +54,8 @@ macro_rules! range_impl {
         }
 
         impl Producer for RangeIter<$t> {
+            type Splitter = ThiefSplitter; // default
+
             fn cost(&mut self, len: usize) -> f64 {
                 len as f64
             }

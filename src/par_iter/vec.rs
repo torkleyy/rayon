@@ -70,6 +70,8 @@ pub struct VecProducer<'data, T: 'data + Send> {
 }
 
 impl<'data, T: 'data + Send> Producer for VecProducer<'data, T> {
+    type Splitter = ThiefSplitter; // default
+
     fn cost(&mut self, len: usize) -> f64 {
         len as f64
     }

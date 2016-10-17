@@ -105,6 +105,8 @@ pub struct OptionProducer<T: Send> {
 }
 
 impl<T: Send> Producer for OptionProducer<T> {
+    type Splitter = ThiefSplitter; // default
+
     fn cost(&mut self, len: usize) -> f64 {
         len as f64
     }
