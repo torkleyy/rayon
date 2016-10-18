@@ -31,6 +31,16 @@ fn nbody_par(b: &mut ::test::Bencher) {
 }
 
 #[bench]
+fn nbody_par_unweighted(b: &mut ::test::Bencher) {
+    nbody_bench(b, |n| { n.tick_par_unweighted(); });
+}
+
+#[bench]
 fn nbody_parreduce(b: &mut ::test::Bencher) {
     nbody_bench(b, |n| { n.tick_par_reduce(); });
+}
+
+#[bench]
+fn nbody_parreduce_unweighted(b: &mut ::test::Bencher) {
+    nbody_bench(b, |n| { n.tick_par_reduce_unweighted(); });
 }
