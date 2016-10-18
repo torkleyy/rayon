@@ -138,7 +138,7 @@ impl ThiefSplitter {
     fn new() -> Self {
         ThiefSplitter {
             origin: ThiefSplitter::id(),
-            splits: get_registry().num_threads() * 2,
+            splits: get_registry().num_threads(),
         }
     }
 }
@@ -155,7 +155,7 @@ impl SplitterTry for ThiefSplitter {
         let id = ThiefSplitter::id();
         if self.origin != id {
             self.origin = id;
-            self.splits = get_registry().num_threads() * 2;
+            self.splits = get_registry().num_threads();
             true
         } else if self.splits > 0 {
             self.splits /= 2;
