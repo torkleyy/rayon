@@ -109,7 +109,7 @@ pub struct ZipProducer<A: Producer, B: Producer> {
 }
 
 impl<A: Producer, B: Producer> Producer for ZipProducer<A, B> {
-    type Splitter = CostSplitter; // FIXME resolve A::Splitter ∪ B::Splitter
+    type Splitter = JoinSplitter<A::Splitter, B::Splitter>;
 
     fn cost(&mut self, len: usize) -> f64 {
         // Rather unclear that this should be `+`. It might be that max is better?

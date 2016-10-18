@@ -75,9 +75,11 @@ pub trait UnindexedConsumer<ITEM>: Consumer<ITEM> {
 }
 
 /// A splitter controls the policy for splitting into smaller work items.
-pub trait Splitter: Copy + Send + Sized {
-    fn new<P, C>(len: usize, producer: &mut P, consumer: &mut C) -> Self
-        where P: Producer, C: Consumer<P::Item>;
+pub trait Splitter {
+    fn use_cost() -> bool;
+}
+
+pub trait SplitterTry: Copy + Send + Sized {
     fn try(&mut self) -> bool;
 }
 
@@ -85,7 +87,7 @@ pub trait Splitter: Copy + Send + Sized {
 #[derive(Clone, Copy)]
 pub struct CostSplitter(f64);
 
-impl Splitter for CostSplitter {
+impl CostSplitter {
     #[inline]
     fn new<P, C>(len: usize, producer: &mut P, consumer: &mut C) -> Self
         where P: Producer, C: Consumer<P::Item>
@@ -94,7 +96,15 @@ impl Splitter for CostSplitter {
         let cost = consumer.cost(producer_cost);
         CostSplitter(cost)
     }
+}
 
+impl Splitter for CostSplitter {
+    fn use_cost() -> bool {
+        true
+    }
+}
+
+impl SplitterTry for CostSplitter {
     #[inline]
     fn try(&mut self) -> bool {
         if self.0 > THRESHOLD {
@@ -123,19 +133,23 @@ impl ThiefSplitter {
         thread_local!{ static ID: bool = false; }
         ID.with(|id| id as *const bool as usize )
     }
-}
 
-impl Splitter for ThiefSplitter {
     #[inline]
-    fn new<P, C>(_len: usize, _producer: &mut P, _consumer: &mut C) -> Self
-        where P: Producer, C: Consumer<P::Item>
-    {
+    fn new() -> Self {
         ThiefSplitter {
             origin: ThiefSplitter::id(),
             splits: get_registry().num_threads(),
         }
     }
+}
 
+impl Splitter for ThiefSplitter {
+    fn use_cost() -> bool {
+        false
+    }
+}
+
+impl SplitterTry for ThiefSplitter {
     #[inline]
     fn try(&mut self) -> bool {
         let id = ThiefSplitter::id();
@@ -149,6 +163,16 @@ impl Splitter for ThiefSplitter {
         } else {
             false
         }
+    }
+}
+
+pub struct JoinSplitter<A: Splitter, B: Splitter> {
+    private: (A,B)
+}
+
+impl<A: Splitter, B: Splitter> Splitter for JoinSplitter<A, B> {
+    fn use_cost() -> bool {
+        A::use_cost() || B::use_cost()
     }
 }
 
@@ -173,9 +197,13 @@ pub fn bridge<PAR_ITER,C>(mut par_iter: PAR_ITER,
         fn callback<P>(mut self, mut producer: P) -> C::Result
             where P: Producer<Item=ITEM>
         {
-            type S = CostSplitter; // FIXME resolve P::Splitter ∪ C::Splitter
-            let splitter = S::new(self.len, &mut producer, &mut self.consumer);
-            bridge_producer_consumer(self.len, splitter, producer, self.consumer)
+            if P::Splitter::use_cost() || C::Splitter::use_cost() {
+                let splitter = CostSplitter::new(self.len, &mut producer, &mut self.consumer);
+                bridge_producer_consumer(self.len, splitter, producer, self.consumer)
+            } else {
+                let splitter = ThiefSplitter::new();
+                bridge_producer_consumer(self.len, splitter, producer, self.consumer)
+            }
         }
     }
 }
@@ -185,7 +213,7 @@ fn bridge_producer_consumer<S,P,C>(len: usize,
                                    producer: P,
                                    consumer: C)
                                    -> C::Result
-    where S: Splitter, P: Producer, C: Consumer<P::Item>
+    where S: SplitterTry, P: Producer, C: Consumer<P::Item>
 {
     if len > 1 && splitter.try() {
         let mid = len / 2;
