@@ -27,6 +27,9 @@ pub trait Producer: IntoIterator + Send + Sized {
     /// Split into two producers; one produces items `0..index`, the
     /// other `index..N`. Index must be less than `N`.
     fn split_at(self, index: usize) -> (Self, Self);
+
+    /// Produce a reversed Output
+    fn rev(self) -> Self;
 }
 
 /// A consumer which consumes items that are fed to it.

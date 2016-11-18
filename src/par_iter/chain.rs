@@ -163,6 +163,10 @@ impl<A, B> Producer for ChainProducer<A, B>
              ChainProducer::new(0, a_right, b_right))
         }
     }
+
+    fn rev(self) -> Self {
+        ChainProducer::new(self.len, self.b.rev(), self.a.rev())
+    }
 }
 
 impl<A, B> IntoIterator for ChainProducer<A, B>

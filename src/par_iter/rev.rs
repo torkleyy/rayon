@@ -3,17 +3,17 @@ use super::internal::*;
 use std::iter;
 use std::ops::RangeFrom;
 
-pub struct Enumerate<M> {
+pub struct Rev<M> {
     base: M,
 }
 
-impl<M> Enumerate<M> {
-    pub fn new(base: M) -> Enumerate<M> {
-        Enumerate { base: base }
+impl<M> Rev<M> {
+    pub fn new(base: M) -> Rev<M> {
+        Rev { base: base }
     }
 }
 
-impl<M> ParallelIterator for Enumerate<M>
+impl<M> ParallelIterator for Rev<M>
     where M: IndexedParallelIterator,
 {
     type Item = (usize, M::Item);
@@ -25,7 +25,7 @@ impl<M> ParallelIterator for Enumerate<M>
     }
 }
 
-impl<M> BoundedParallelIterator for Enumerate<M>
+impl<M> BoundedParallelIterator for Rev<M>
     where M: IndexedParallelIterator,
 {
     fn upper_bound(&mut self) -> usize {
@@ -37,7 +37,7 @@ impl<M> BoundedParallelIterator for Enumerate<M>
     }
 }
 
-impl<M> ExactParallelIterator for Enumerate<M>
+impl<M> ExactParallelIterator for Rev<M>
     where M: IndexedParallelIterator,
 {
     fn len(&mut self) -> usize {
@@ -45,7 +45,7 @@ impl<M> ExactParallelIterator for Enumerate<M>
     }
 }
 
-impl<M> IndexedParallelIterator for Enumerate<M>
+impl<M> IndexedParallelIterator for Rev<M>
     where M: IndexedParallelIterator,
 {
     fn with_producer<CB>(self, callback: CB) -> CB::Output
@@ -64,9 +64,9 @@ impl<M> IndexedParallelIterator for Enumerate<M>
             fn callback<P>(self, base: P) -> CB::Output
                 where P: Producer<Item=ITEM>
             {
-                let producer = EnumerateProducer { base: base,
-                                                   offset: 0 };
-                self.callback.callback(producer)
+                let producer = RevProducer { base: base,
+                                             offset: 0 };
+                self.callback.callback(producer.rev())
             }
         }
     }
@@ -75,12 +75,12 @@ impl<M> IndexedParallelIterator for Enumerate<M>
 ///////////////////////////////////////////////////////////////////////////
 // Producer implementation
 
-pub struct EnumerateProducer<P> {
+pub struct RevProducer<P> {
     base: P,
     offset: usize,
 }
 
-impl<P> Producer for EnumerateProducer<P>
+impl<P> Producer for RevProducer<P>
     where P: Producer
 {
     fn weighted(&self) -> bool {
@@ -93,21 +93,14 @@ impl<P> Producer for EnumerateProducer<P>
 
     fn split_at(self, index: usize) -> (Self, Self) {
         let (left, right) = self.base.split_at(index);
-        (EnumerateProducer { base: left,
-                             offset: self.offset },
-         EnumerateProducer { base: right,
-                             offset: self.offset + index })
-    }
-
-    fn rev(self) -> Self {
-        EnumerateProducer {
-            base: self.base.rev(),
-            offset: self.offset
-        }
+        (RevProducer { base: left,
+                       offset: self.offset },
+         RevProducer { base: right,
+                       offset: self.offset + index })
     }
 }
 
-impl<P> IntoIterator for EnumerateProducer<P> where P: Producer {
+impl<P> IntoIterator for RevProducer<P> where P: Producer {
     type Item = (usize, P::Item);
     type IntoIter = iter::Zip<RangeFrom<usize>, P::IntoIter>;
 

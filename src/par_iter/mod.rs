@@ -25,6 +25,7 @@ use self::reduce::{reduce, ReduceOp, SumOp, ProductOp, MinOp, MaxOp,
                    ReduceWithIdentityOp, SUM, PRODUCT, MIN, MAX};
 use self::internal::*;
 use self::weight::Weight;
+use self::rev::Rev;
 use self::zip::ZipIter;
 
 pub mod find;
@@ -45,6 +46,7 @@ pub mod slice_mut;
 pub mod map;
 pub mod weight;
 pub mod zip;
+pub mod rev;
 pub mod range;
 pub mod vec;
 pub mod option;
@@ -195,6 +197,13 @@ pub trait ParallelIterator: Sized {
         where FILTER_OP: Fn(&Self::Item) -> bool + Sync
     {
         Filter::new(self, filter_op)
+    }
+
+    /// Returns a reverse iterator
+    fn rev(self) -> Rev<Self>
+        where Self: IndexedParallelIterator
+    {
+        Rev::new(self)
     }
 
     /// Applies `filter_op` to each item of this iterator to get an `Option`,
