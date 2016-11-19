@@ -18,6 +18,8 @@ pub trait ProducerCallback<ITEM> {
 /// not queryable through the API; the consumer is expected to track
 /// it.
 pub trait Producer: IntoIterator + Send + Sized {
+    type RevProducer: Producer<Item = Self::Item>;
+
     /// Reports whether the producer has explicit weights.
     fn weighted(&self) -> bool { false }
 
@@ -29,7 +31,7 @@ pub trait Producer: IntoIterator + Send + Sized {
     fn split_at(self, index: usize) -> (Self, Self);
 
     /// Produce a reversed Output
-    fn rev(self) -> Self;
+    fn rev(self) -> Self::RevProducer;
 }
 
 /// A consumer which consumes items that are fed to it.

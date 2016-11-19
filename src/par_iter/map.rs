@@ -137,6 +137,8 @@ impl<'m, P, MAP_OP> Producer for MapProducer<'m, P, MAP_OP>
     where P: Producer,
           MAP_OP: MapOp<P::Item>,
 {
+    type RevProducer = MapProducer<'m, P::RevProducer, MAP_OP>;
+
     fn weighted(&self) -> bool {
         self.base.weighted()
     }
@@ -149,6 +151,13 @@ impl<'m, P, MAP_OP> Producer for MapProducer<'m, P, MAP_OP>
         let (left, right) = self.base.split_at(index);
         (MapProducer { base: left, map_op: self.map_op, },
          MapProducer { base: right, map_op: self.map_op, })
+    }
+
+    fn rev(self) -> Self::RevProducer {
+        MapProducer {
+            base: self.base.rev(),
+            map_op: self.map_op
+        }
     }
 }
 

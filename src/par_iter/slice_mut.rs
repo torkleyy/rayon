@@ -1,5 +1,6 @@
 use super::*;
 use super::internal::*;
+use std::iter::Rev;
 
 pub struct SliceIterMut<'data, T: 'data + Send> {
     slice: &'data mut [T]
@@ -115,8 +116,14 @@ pub struct SliceMutProducer<'data, T: 'data + Send> {
     slice: &'data mut [T]
 }
 
+pub struct SliceMutRevProducer<'data, T: 'data + Send> {
+    slice: &'data mut [T]
+}
+
 impl<'data, T: 'data + Send> Producer for SliceMutProducer<'data, T>
 {
+    type RevProducer = SliceMutRevProducer<'data, T>;
+
     fn cost(&mut self, len: usize) -> f64 {
         len as f64
     }
@@ -124,6 +131,33 @@ impl<'data, T: 'data + Send> Producer for SliceMutProducer<'data, T>
     fn split_at(self, index: usize) -> (Self, Self) {
         let (left, right) = self.slice.split_at_mut(index);
         (SliceMutProducer { slice: left }, SliceMutProducer { slice: right })
+    }
+
+    fn rev(self) -> Self::RevProducer {
+        SliceMutRevProducer {
+            slice: self.slice
+        }
+    }
+}
+
+impl<'data, T: 'data + Send> Producer for SliceMutRevProducer<'data, T>
+{
+    type RevProducer = SliceMutProducer<'data, T>;
+
+    fn cost(&mut self, len: usize) -> f64 {
+        len as f64
+    }
+
+    fn split_at(self, index: usize) -> (Self, Self) {
+        //FIXME FIXME FIXME - this probably needs to be updated
+        let (left, right) = self.slice.split_at_mut(index);
+        (SliceMutRevProducer { slice: left }, SliceMutRevProducer { slice: right })
+    }
+
+    fn rev(self) -> Self::RevProducer {
+        SliceMutProducer {
+            slice: self.slice
+        }
     }
 }
 
@@ -136,12 +170,28 @@ impl<'data, T: 'data + Send> IntoIterator for SliceMutProducer<'data, T> {
     }
 }
 
+impl<'data, T: 'data + Send> IntoIterator for SliceMutRevProducer<'data, T> {
+    type Item = &'data mut T;
+    type IntoIter = Rev<::std::slice::IterMut<'data, T>>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.slice.into_iter().rev()
+    }
+}
+
 pub struct SliceChunksMutProducer<'data, T: 'data + Send> {
     chunk_size: usize,
     slice: &'data mut [T]
 }
 
+pub struct SliceChunksMutRevProducer<'data, T: 'data + Send> {
+    chunk_size: usize,
+    slice: &'data mut [T]
+}
+
 impl<'data, T: 'data + Send> Producer for SliceChunksMutProducer<'data, T> {
+    type RevProducer = SliceChunksMutRevProducer<'data, T>;
+
     fn cost(&mut self, len: usize) -> f64 {
         len as f64
     }
@@ -152,6 +202,35 @@ impl<'data, T: 'data + Send> Producer for SliceChunksMutProducer<'data, T> {
         (SliceChunksMutProducer { chunk_size: self.chunk_size, slice: left },
          SliceChunksMutProducer { chunk_size: self.chunk_size, slice: right })
     }
+
+    fn rev(self) -> Self::RevProducer {
+        SliceChunksMutRevProducer {
+            chunk_size: self.chunk_size,
+            slice: self.slice
+        }
+    }
+}
+
+impl<'data, T: 'data + Send> Producer for SliceChunksMutRevProducer<'data, T> {
+    type RevProducer = SliceChunksMutProducer<'data, T>;
+
+    fn cost(&mut self, len: usize) -> f64 {
+        len as f64
+    }
+
+    fn split_at(self, index: usize) -> (Self, Self) {
+        let elem_index = index * self.chunk_size;
+        let (left, right) = self.slice.split_at_mut(elem_index);
+        (SliceChunksMutRevProducer { chunk_size: self.chunk_size, slice: left },
+         SliceChunksMutRevProducer { chunk_size: self.chunk_size, slice: right })
+    }
+
+    fn rev(self) -> Self::RevProducer {
+        SliceChunksMutProducer {
+            chunk_size: self.chunk_size,
+            slice: self.slice
+        }
+    }
 }
 
 impl<'data, T: 'data + Send> IntoIterator for SliceChunksMutProducer<'data, T> {
@@ -160,5 +239,14 @@ impl<'data, T: 'data + Send> IntoIterator for SliceChunksMutProducer<'data, T> {
 
     fn into_iter(self) -> Self::IntoIter {
         self.slice.chunks_mut(self.chunk_size)
+    }
+}
+
+impl<'data, T: 'data + Send> IntoIterator for SliceChunksMutRevProducer<'data, T> {
+    type Item = &'data mut [T];
+    type IntoIter = Rev<::std::slice::ChunksMut<'data, T>>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.slice.chunks_mut(self.chunk_size).rev()
     }
 }

@@ -1,8 +1,13 @@
 use super::*;
 use super::internal::*;
 use std::ops::Range;
+use std::iter::Rev;
 
 pub struct RangeIter<T> {
+    range: Range<T>
+}
+
+pub struct RangeRevIter<T> {
     range: Range<T>
 }
 
@@ -18,6 +23,17 @@ impl<T> IntoParallelIterator for Range<T>
 }
 
 impl<T> IntoIterator for RangeIter<T>
+    where Range<T>: Iterator
+{
+    type Item = <Range<T> as Iterator>::Item;
+    type IntoIter = Range<T>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.range
+    }
+}
+
+impl<T> IntoIterator for RangeRevIter<T>
     where Range<T>: Iterator
 {
     type Item = <Range<T> as Iterator>::Item;
@@ -67,6 +83,8 @@ macro_rules! indexed_range_impl {
         }
 
         impl Producer for RangeIter<$t> {
+            type RevProducer = RangeRevIter<$t>;
+
             fn cost(&mut self, len: usize) -> f64 {
                 len as f64
             }
@@ -79,6 +97,37 @@ macro_rules! indexed_range_impl {
                 let left = self.range.start .. mid;
                 let right = mid .. self.range.end;
                 (RangeIter { range: left }, RangeIter { range: right })
+            }
+
+            fn rev(self) -> Self::RevProducer {
+                RangeRevIter {
+                    //FIXME FIXME FIXME - cheat for now so that this will compile
+                    range: self.range
+                }
+            }
+        }
+        impl Producer for RangeRevIter<$t> {
+            type RevProducer = RangeIter<$t>;
+
+            fn cost(&mut self, len: usize) -> f64 {
+                len as f64
+            }
+
+            fn split_at(self, index: usize) -> (Self, Self) {
+                assert!(index <= self.range.len());
+                // For signed $t, the length and requested index could be greater than $t::MAX, and
+                // then `index as $t` could wrap to negative, so wrapping_add is necessary.
+                let mid = self.range.start.wrapping_add(index as $t);
+                let left = self.range.start .. mid;
+                let right = mid .. self.range.end;
+                (RangeRevIter { range: left }, RangeRevIter { range: right })
+            }
+
+            fn rev(self) -> Self::RevProducer {
+                RangeIter {
+                    //FIXME FIXME FIXME - cheat for now so that this will compile
+                    range: self.range
+                }
             }
         }
     }

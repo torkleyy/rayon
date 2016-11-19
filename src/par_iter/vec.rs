@@ -1,6 +1,7 @@
 use super::*;
 use super::internal::*;
 use std;
+use std::iter::Rev;
 
 pub struct VecIter<T: Send> {
     vec: Vec<T>,
@@ -69,7 +70,13 @@ pub struct VecProducer<'data, T: 'data + Send> {
     slice: &'data mut [T]
 }
 
+pub struct VecRevProducer<'data, T: 'data + Send> {
+    slice: &'data mut [T]
+}
+
 impl<'data, T: 'data + Send> Producer for VecProducer<'data, T> {
+    type RevProducer = VecRevProducer<'data, T>;
+
     fn cost(&mut self, len: usize) -> f64 {
         len as f64
     }
@@ -79,6 +86,34 @@ impl<'data, T: 'data + Send> Producer for VecProducer<'data, T> {
         let slice = std::mem::replace(&mut self.slice, &mut []);
         let (left, right) = slice.split_at_mut(index);
         (VecProducer { slice: left }, VecProducer { slice: right })
+    }
+
+    fn rev(self) -> Self::RevProducer {
+        VecRevProducer {
+            slice: self.slice
+        }
+    }
+}
+
+impl<'data, T: 'data + Send> Producer for VecRevProducer<'data, T> {
+    type RevProducer = VecProducer<'data, T>;
+
+    fn cost(&mut self, len: usize) -> f64 {
+        len as f64
+    }
+
+    fn split_at(mut self, index: usize) -> (Self, Self) {
+        // replace the slice so we don't drop it twice
+        //FIXME FIXME FIXME - this probably needs to be updated
+        let slice = std::mem::replace(&mut self.slice, &mut []);
+        let (left, right) = slice.split_at_mut(index);
+        (VecRevProducer { slice: left }, VecRevProducer { slice: right })
+    }
+
+    fn rev(self) -> Self::RevProducer {
+        VecProducer {
+            slice: self.slice
+        }
     }
 }
 
@@ -93,8 +128,27 @@ impl<'data, T: 'data + Send> IntoIterator for VecProducer<'data, T> {
     }
 }
 
+impl<'data, T: 'data + Send> IntoIterator for VecRevProducer<'data, T> {
+    type Item = T;
+    type IntoIter = SliceDrain<'data, T>;
+
+    fn into_iter(mut self) -> Self::IntoIter {
+        // replace the slice so we don't drop it twice
+        //FIXME: actually reverse this thing
+        let slice = std::mem::replace(&mut self.slice, &mut []);
+        SliceDrain { iter: slice.iter_mut() }
+    }
+}
+
 impl<'data, T: 'data + Send> Drop for VecProducer<'data, T> {
     fn drop(&mut self) {
+        SliceDrain { iter: self.slice.iter_mut() };
+    }
+}
+
+impl<'data, T: 'data + Send> Drop for VecRevProducer<'data, T> {
+    fn drop(&mut self) {
+        //FIXME: make sure this doesn't need to be drained in reverse
         SliceDrain { iter: self.slice.iter_mut() };
     }
 }

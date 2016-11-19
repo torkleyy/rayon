@@ -16,7 +16,7 @@ impl<M> Rev<M> {
 impl<M> ParallelIterator for Rev<M>
     where M: IndexedParallelIterator,
 {
-    type Item = (usize, M::Item);
+    type Item = M::Item;
 
     fn drive_unindexed<C>(self, consumer: C) -> C::Result
         where C: UnindexedConsumer<Self::Item>
@@ -58,14 +58,13 @@ impl<M> IndexedParallelIterator for Rev<M>
         }
 
         impl<ITEM, CB> ProducerCallback<ITEM> for Callback<CB>
-            where CB: ProducerCallback<(usize, ITEM)>
+            where CB: ProducerCallback<ITEM>
         {
             type Output = CB::Output;
             fn callback<P>(self, base: P) -> CB::Output
                 where P: Producer<Item=ITEM>
             {
-                let producer = RevProducer { base: base,
-                                             offset: 0 };
+                let producer = RevProducer { base: base };
                 self.callback.callback(producer.rev())
             }
         }
@@ -76,13 +75,14 @@ impl<M> IndexedParallelIterator for Rev<M>
 // Producer implementation
 
 pub struct RevProducer<P> {
-    base: P,
-    offset: usize,
+    base: P
 }
 
 impl<P> Producer for RevProducer<P>
     where P: Producer
 {
+    type RevProducer = RevProducer<P::RevProducer>;
+
     fn weighted(&self) -> bool {
         self.base.weighted()
     }
@@ -93,18 +93,22 @@ impl<P> Producer for RevProducer<P>
 
     fn split_at(self, index: usize) -> (Self, Self) {
         let (left, right) = self.base.split_at(index);
-        (RevProducer { base: left,
-                       offset: self.offset },
-         RevProducer { base: right,
-                       offset: self.offset + index })
+        (RevProducer { base: left },
+         RevProducer { base: right })
+    }
+
+    fn rev(self) -> Self::RevProducer {
+        RevProducer {
+            base: self.base.rev()
+        }
     }
 }
 
 impl<P> IntoIterator for RevProducer<P> where P: Producer {
-    type Item = (usize, P::Item);
-    type IntoIter = iter::Zip<RangeFrom<usize>, P::IntoIter>;
+    type Item = P::Item;
+    type IntoIter = P::IntoIter;
 
     fn into_iter(self) -> Self::IntoIter {
-        (self.offset..).zip(self.base)
+        self.base.into_iter()
     }
 }

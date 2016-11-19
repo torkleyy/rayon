@@ -109,6 +109,8 @@ pub struct ZipProducer<A: Producer, B: Producer> {
 }
 
 impl<A: Producer, B: Producer> Producer for ZipProducer<A, B> {
+    type RevProducer = ZipProducer<A::RevProducer, B::RevProducer>;
+
     fn weighted(&self) -> bool {
         self.a.weighted() || self.b.weighted()
     }
@@ -123,6 +125,13 @@ impl<A: Producer, B: Producer> Producer for ZipProducer<A, B> {
         let (b_left, b_right) = self.b.split_at(index);
         (ZipProducer { a: a_left, b: b_left },
          ZipProducer { a: a_right, b: b_right, })
+    }
+
+    fn rev(self) -> Self::RevProducer {
+        ZipProducer {
+            a: self.a.rev(),
+            b: self.b.rev()
+        }
     }
 }
 

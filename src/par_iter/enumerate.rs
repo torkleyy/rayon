@@ -83,6 +83,8 @@ pub struct EnumerateProducer<P> {
 impl<P> Producer for EnumerateProducer<P>
     where P: Producer
 {
+    type RevProducer = EnumerateProducer<P::RevProducer>;
+
     fn weighted(&self) -> bool {
         self.base.weighted()
     }
@@ -99,7 +101,7 @@ impl<P> Producer for EnumerateProducer<P>
                              offset: self.offset + index })
     }
 
-    fn rev(self) -> Self {
+    fn rev(self) -> Self::RevProducer {
         EnumerateProducer {
             base: self.base.rev(),
             offset: self.offset

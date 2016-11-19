@@ -78,6 +78,8 @@ pub struct WeightProducer<P> {
 }
 
 impl<P: Producer> Producer for WeightProducer<P> {
+    type RevProducer = WeightProducer<P::RevProducer>;
+
     fn weighted(&self) -> bool {
         true
     }
@@ -90,6 +92,13 @@ impl<P: Producer> Producer for WeightProducer<P> {
         let (left, right) = self.base.split_at(index);
         (WeightProducer { base: left, weight: self.weight },
          WeightProducer { base: right, weight: self.weight })
+    }
+
+    fn rev(self) -> Self::RevProducer {
+        WeightProducer {
+            base: self.base.rev(),
+            weight: self.weight
+        }
     }
 }
 

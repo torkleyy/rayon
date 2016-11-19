@@ -139,6 +139,8 @@ impl<A, B> ChainProducer<A, B>
 impl<A, B> Producer for ChainProducer<A, B>
     where A: Producer, B: Producer<Item=A::Item>
 {
+    type RevProducer = ChainProducer<B::RevProducer, A::RevProducer>;
+
     fn weighted(&self) -> bool {
         self.a.weighted() || self.b.weighted()
     }
@@ -164,8 +166,8 @@ impl<A, B> Producer for ChainProducer<A, B>
         }
     }
 
-    fn rev(self) -> Self {
-        ChainProducer::new(self.len, self.b.rev(), self.a.rev())
+    fn rev(self) -> Self::RevProducer {
+        ChainProducer::new(self.a_len, self.b.rev(), self.a.rev())
     }
 }
 

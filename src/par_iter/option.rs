@@ -1,6 +1,7 @@
 use super::*;
 use super::internal::*;
 use std;
+use std::iter::Rev;
 
 pub struct OptionIter<T: Send> {
     opt: Option<T>
@@ -104,7 +105,13 @@ pub struct OptionProducer<T: Send> {
     opt: Option<T>
 }
 
+pub struct OptionRevProducer<T: Send> {
+    opt: Option<T>
+}
+
 impl<T: Send> Producer for OptionProducer<T> {
+    type RevProducer = OptionRevProducer<T>;
+
     fn cost(&mut self, len: usize) -> f64 {
         len as f64
     }
@@ -112,6 +119,31 @@ impl<T: Send> Producer for OptionProducer<T> {
     fn split_at(self, index: usize) -> (Self, Self) {
         let none = OptionProducer { opt: None };
         if index == 0 { (none, self) } else { (self, none) }
+    }
+
+    fn rev(self) -> Self::RevProducer {
+        OptionRevProducer {
+            opt: self.opt
+        }
+    }
+}
+
+impl<T: Send> Producer for OptionRevProducer<T> {
+    type RevProducer = OptionProducer<T>;
+
+    fn cost(&mut self, len: usize) -> f64 {
+        len as f64
+    }
+
+    fn split_at(self, index: usize) -> (Self, Self) {
+        let none = OptionRevProducer { opt: None };
+        if index == 0 { (none, self) } else { (self, none) }
+    }
+
+    fn rev(self) -> Self::RevProducer {
+        OptionProducer {
+            opt: self.opt
+        }
     }
 }
 
@@ -121,5 +153,14 @@ impl<T: Send> IntoIterator for OptionProducer<T> {
 
     fn into_iter(self) -> Self::IntoIter {
         self.opt.into_iter()
+    }
+}
+
+impl<T: Send> IntoIterator for OptionRevProducer<T> {
+    type Item = T;
+    type IntoIter = Rev<std::option::IntoIter<T>>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.opt.into_iter().rev()
     }
 }
