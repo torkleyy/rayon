@@ -136,40 +136,41 @@ impl<A, B> ChainProducer<A, B>
     }
 }
 
-impl<A, B> Producer for ChainProducer<A, B>
-    where A: Producer, B: Producer<Item=A::Item>
-{
-    type RevProducer = ChainProducer<B::RevProducer, A::RevProducer>;
-
-    fn weighted(&self) -> bool {
-        self.a.weighted() || self.b.weighted()
-    }
-
-    fn cost(&mut self, len: usize) -> f64 {
-        let a_len = min(self.a_len, len);
-        let b_len = len - a_len;
-        self.a.cost(a_len) + self.b.cost(b_len)
-    }
-
-    fn split_at(self, index: usize) -> (Self, Self) {
-        if index <= self.a_len {
-            let a_rem = self.a_len - index;
-            let (a_left, a_right) = self.a.split_at(index);
-            let (b_left, b_right) = self.b.split_at(0);
-            (ChainProducer::new(index, a_left, b_left),
-             ChainProducer::new(a_rem, a_right, b_right))
-        } else {
-            let (a_left, a_right) = self.a.split_at(self.a_len);
-            let (b_left, b_right) = self.b.split_at(index - self.a_len);
-            (ChainProducer::new(self.a_len, a_left, b_left),
-             ChainProducer::new(0, a_right, b_right))
-        }
-    }
-
-    fn rev(self) -> Self::RevProducer {
-        ChainProducer::new(self.a_len, self.b.rev(), self.a.rev())
-    }
-}
+//impl<A, B> Producer for ChainProducer<A, B>
+//    where A: Producer, B: Producer<Item=A::Item>
+//{
+//    type DoubleEndedIterator = iter::Chain<A::DoubleEndedIterator, B::DoubleEndedIterator>;
+//    type RevProducer = ChainProducer<B::RevProducer, A::RevProducer>;
+//
+//    fn weighted(&self) -> bool {
+//        self.a.weighted() || self.b.weighted()
+//    }
+//
+//    fn cost(&mut self, len: usize) -> f64 {
+//        let a_len = min(self.a_len, len);
+//        let b_len = len - a_len;
+//        self.a.cost(a_len) + self.b.cost(b_len)
+//    }
+//
+//    fn split_at(self, index: usize) -> (Self, Self) {
+//        if index <= self.a_len {
+//            let a_rem = self.a_len - index;
+//            let (a_left, a_right) = self.a.split_at(index);
+//            let (b_left, b_right) = self.b.split_at(0);
+//            (ChainProducer::new(index, a_left, b_left),
+//             ChainProducer::new(a_rem, a_right, b_right))
+//        } else {
+//            let (a_left, a_right) = self.a.split_at(self.a_len);
+//            let (b_left, b_right) = self.b.split_at(index - self.a_len);
+//            (ChainProducer::new(self.a_len, a_left, b_left),
+//             ChainProducer::new(0, a_right, b_right))
+//        }
+//    }
+//
+//    fn rev(self) -> Self::RevProducer {
+//        ChainProducer::new(self.a_len, self.b.rev(), self.a.rev())
+//    }
+//}
 
 impl<A, B> IntoIterator for ChainProducer<A, B>
     where A: Producer, B: Producer<Item=A::Item>

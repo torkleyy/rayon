@@ -109,6 +109,7 @@ pub struct ZipProducer<A: Producer, B: Producer> {
 }
 
 impl<A: Producer, B: Producer> Producer for ZipProducer<A, B> {
+    type DoubleEndedIterator = iter::Zip<A::DoubleEndedIterator, B::DoubleEndedIterator>;
     type RevProducer = ZipProducer<A::RevProducer, B::RevProducer>;
 
     fn weighted(&self) -> bool {

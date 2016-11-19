@@ -122,6 +122,7 @@ pub struct SliceMutRevProducer<'data, T: 'data + Send> {
 
 impl<'data, T: 'data + Send> Producer for SliceMutProducer<'data, T>
 {
+    type DoubleEndedIterator = ::std::slice::IterMut<'data, T>;
     type RevProducer = SliceMutRevProducer<'data, T>;
 
     fn cost(&mut self, len: usize) -> f64 {
@@ -142,6 +143,7 @@ impl<'data, T: 'data + Send> Producer for SliceMutProducer<'data, T>
 
 impl<'data, T: 'data + Send> Producer for SliceMutRevProducer<'data, T>
 {
+    type DoubleEndedIterator = ::std::slice::IterMut<'data, T>;
     type RevProducer = SliceMutProducer<'data, T>;
 
     fn cost(&mut self, len: usize) -> f64 {
@@ -190,6 +192,7 @@ pub struct SliceChunksMutRevProducer<'data, T: 'data + Send> {
 }
 
 impl<'data, T: 'data + Send> Producer for SliceChunksMutProducer<'data, T> {
+    type DoubleEndedIterator = ::std::slice::ChunksMut<'data, T>;
     type RevProducer = SliceChunksMutRevProducer<'data, T>;
 
     fn cost(&mut self, len: usize) -> f64 {
@@ -212,6 +215,7 @@ impl<'data, T: 'data + Send> Producer for SliceChunksMutProducer<'data, T> {
 }
 
 impl<'data, T: 'data + Send> Producer for SliceChunksMutRevProducer<'data, T> {
+    type DoubleEndedIterator = ::std::slice::ChunksMut<'data, T>;
     type RevProducer = SliceChunksMutProducer<'data, T>;
 
     fn cost(&mut self, len: usize) -> f64 {

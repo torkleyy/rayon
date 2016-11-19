@@ -137,6 +137,7 @@ impl<'m, P, MAP_OP> Producer for MapProducer<'m, P, MAP_OP>
     where P: Producer,
           MAP_OP: MapOp<P::Item>,
 {
+    type DoubleEndedIterator = MapIter<'m, P::DoubleEndedIterator, MAP_OP>;
     type RevProducer = MapProducer<'m, P::RevProducer, MAP_OP>;
 
     fn weighted(&self) -> bool {
@@ -187,9 +188,27 @@ impl<'m, I, MAP_OP> Iterator for MapIter<'m, I, MAP_OP>
           MAP_OP: MapOp<I::Item>,
 {
     type Item = MAP_OP::Output;
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        self.base.size_hint()
+    }
     fn next(&mut self) -> Option<Self::Item> {
         self.base.next().map(|value| self.map_op.map(value))
     }
+}
+
+impl<'m, I, MAP_OP> DoubleEndedIterator for MapIter<'m, I, MAP_OP>
+    where I: DoubleEndedIterator,
+          MAP_OP: MapOp<I::Item>,
+{
+    fn next_back(&mut self) -> Option<Self::Item> {
+        self.base.next_back().map(|value| self.map_op.map(value))
+    }
+}
+
+impl<'m, I, MAP_OP> ExactSizeIterator for MapIter<'m, I, MAP_OP>
+    where I: ExactSizeIterator,
+          MAP_OP: MapOp<I::Item>,
+{
 }
 
 

@@ -1,7 +1,8 @@
 use super::*;
 use super::internal::*;
 use std::iter;
-use std::ops::RangeFrom;
+use std::ops::Range;
+use std::usize::MAX;
 
 pub struct Enumerate<M> {
     base: M,
@@ -83,6 +84,7 @@ pub struct EnumerateProducer<P> {
 impl<P> Producer for EnumerateProducer<P>
     where P: Producer
 {
+    type DoubleEndedIterator = iter::Zip<Range<usize>, P::DoubleEndedIterator>;
     type RevProducer = EnumerateProducer<P::RevProducer>;
 
     fn weighted(&self) -> bool {
@@ -111,9 +113,9 @@ impl<P> Producer for EnumerateProducer<P>
 
 impl<P> IntoIterator for EnumerateProducer<P> where P: Producer {
     type Item = (usize, P::Item);
-    type IntoIter = iter::Zip<RangeFrom<usize>, P::IntoIter>;
+    type IntoIter = iter::Zip<Range<usize>, P::IntoIter>;
 
     fn into_iter(self) -> Self::IntoIter {
-        (self.offset..).zip(self.base)
+        (self.offset..usize::MAX).zip(self.base)
     }
 }

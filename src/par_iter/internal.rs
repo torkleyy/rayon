@@ -18,6 +18,7 @@ pub trait ProducerCallback<ITEM> {
 /// not queryable through the API; the consumer is expected to track
 /// it.
 pub trait Producer: IntoIterator + Send + Sized {
+    type DoubleEndedIterator: Iterator<Item = Self::Item> + DoubleEndedIterator + ExactSizeIterator;
     type RevProducer: Producer<Item = Self::Item>;
 
     /// Reports whether the producer has explicit weights.

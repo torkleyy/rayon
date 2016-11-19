@@ -81,6 +81,7 @@ pub struct RevProducer<P> {
 impl<P> Producer for RevProducer<P>
     where P: Producer
 {
+    type DoubleEndedIterator = iter::Rev<P::DoubleEndedIterator>;
     type RevProducer = RevProducer<P::RevProducer>;
 
     fn weighted(&self) -> bool {

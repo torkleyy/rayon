@@ -74,48 +74,49 @@ pub struct VecRevProducer<'data, T: 'data + Send> {
     slice: &'data mut [T]
 }
 
-impl<'data, T: 'data + Send> Producer for VecProducer<'data, T> {
-    type RevProducer = VecRevProducer<'data, T>;
-
-    fn cost(&mut self, len: usize) -> f64 {
-        len as f64
-    }
-
-    fn split_at(mut self, index: usize) -> (Self, Self) {
-        // replace the slice so we don't drop it twice
-        let slice = std::mem::replace(&mut self.slice, &mut []);
-        let (left, right) = slice.split_at_mut(index);
-        (VecProducer { slice: left }, VecProducer { slice: right })
-    }
-
-    fn rev(self) -> Self::RevProducer {
-        VecRevProducer {
-            slice: self.slice
-        }
-    }
-}
-
-impl<'data, T: 'data + Send> Producer for VecRevProducer<'data, T> {
-    type RevProducer = VecProducer<'data, T>;
-
-    fn cost(&mut self, len: usize) -> f64 {
-        len as f64
-    }
-
-    fn split_at(mut self, index: usize) -> (Self, Self) {
-        // replace the slice so we don't drop it twice
-        //FIXME FIXME FIXME - this probably needs to be updated
-        let slice = std::mem::replace(&mut self.slice, &mut []);
-        let (left, right) = slice.split_at_mut(index);
-        (VecRevProducer { slice: left }, VecRevProducer { slice: right })
-    }
-
-    fn rev(self) -> Self::RevProducer {
-        VecProducer {
-            slice: self.slice
-        }
-    }
-}
+//impl<'data, T: 'data + Send> Producer for VecProducer<'data, T> {
+//    type DoubleEndedIterator = SliceDrain<'data, T>;
+//    type RevProducer = VecRevProducer<'data, T>;
+//
+//    fn cost(&mut self, len: usize) -> f64 {
+//        len as f64
+//    }
+//
+//    fn split_at(mut self, index: usize) -> (Self, Self) {
+//        // replace the slice so we don't drop it twice
+//        let slice = std::mem::replace(&mut self.slice, &mut []);
+//        let (left, right) = slice.split_at_mut(index);
+//        (VecProducer { slice: left }, VecProducer { slice: right })
+//    }
+//
+//    fn rev(self) -> Self::RevProducer {
+//        VecRevProducer {
+//            slice: self.slice
+//        }
+//    }
+//}
+//
+//impl<'data, T: 'data + Send> Producer for VecRevProducer<'data, T> {
+//    type RevProducer = VecProducer<'data, T>;
+//
+//    fn cost(&mut self, len: usize) -> f64 {
+//        len as f64
+//    }
+//
+//    fn split_at(mut self, index: usize) -> (Self, Self) {
+//        // replace the slice so we don't drop it twice
+//        //FIXME FIXME FIXME - this probably needs to be updated
+//        let slice = std::mem::replace(&mut self.slice, &mut []);
+//        let (left, right) = slice.split_at_mut(index);
+//        (VecRevProducer { slice: left }, VecRevProducer { slice: right })
+//    }
+//
+//    fn rev(self) -> Self::RevProducer {
+//        VecProducer {
+//            slice: self.slice
+//        }
+//    }
+//}
 
 impl<'data, T: 'data + Send> IntoIterator for VecProducer<'data, T> {
     type Item = T;

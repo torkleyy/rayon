@@ -83,6 +83,7 @@ macro_rules! indexed_range_impl {
         }
 
         impl Producer for RangeIter<$t> {
+            type DoubleEndedIterator = Range<$t>;
             type RevProducer = RangeRevIter<$t>;
 
             fn cost(&mut self, len: usize) -> f64 {
@@ -107,6 +108,7 @@ macro_rules! indexed_range_impl {
             }
         }
         impl Producer for RangeRevIter<$t> {
+            type DoubleEndedIterator = ::std::option::IntoIter<$t>;
             type RevProducer = RangeIter<$t>;
 
             fn cost(&mut self, len: usize) -> f64 {

@@ -110,6 +110,7 @@ pub struct OptionRevProducer<T: Send> {
 }
 
 impl<T: Send> Producer for OptionProducer<T> {
+    type DoubleEndedIterator = std::option::IntoIter<T>;
     type RevProducer = OptionRevProducer<T>;
 
     fn cost(&mut self, len: usize) -> f64 {
@@ -129,6 +130,7 @@ impl<T: Send> Producer for OptionProducer<T> {
 }
 
 impl<T: Send> Producer for OptionRevProducer<T> {
+    type DoubleEndedIterator = std::option::IntoIter<T>;
     type RevProducer = OptionProducer<T>;
 
     fn cost(&mut self, len: usize) -> f64 {

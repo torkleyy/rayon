@@ -121,6 +121,7 @@ pub struct SliceRevProducer<'data, T: 'data + Sync> {
 }
 
 impl<'data, T: 'data + Sync> Producer for SliceProducer<'data, T> {
+    type DoubleEndedIterator = ::std::slice::Iter<'data, T>;
     type RevProducer = SliceRevProducer<'data, T>;
 
     fn cost(&mut self, len: usize) -> f64 {
@@ -140,6 +141,7 @@ impl<'data, T: 'data + Sync> Producer for SliceProducer<'data, T> {
 }
 
 impl<'data, T: 'data + Sync> Producer for SliceRevProducer<'data, T> {
+    type DoubleEndedIterator = ::std::slice::Iter<'data, T>;
     type RevProducer = SliceProducer<'data, T>;
 
     fn cost(&mut self, len: usize) -> f64 {
@@ -188,6 +190,7 @@ pub struct SliceChunksRevProducer<'data, T: 'data + Sync> {
 }
 
 impl<'data, T: 'data + Sync> Producer for SliceChunksProducer<'data, T> {
+    type DoubleEndedIterator = ::std::slice::Chunks<'data, T>;
     type RevProducer = SliceChunksRevProducer<'data, T>;
 
     fn cost(&mut self, len: usize) -> f64 {
@@ -210,6 +213,7 @@ impl<'data, T: 'data + Sync> Producer for SliceChunksProducer<'data, T> {
 }
 
 impl<'data, T: 'data + Sync> Producer for SliceChunksRevProducer<'data, T> {
+    type DoubleEndedIterator = ::std::slice::Chunks<'data, T>;
     type RevProducer = SliceChunksProducer<'data, T>;
 
     fn cost(&mut self, len: usize) -> f64 {
