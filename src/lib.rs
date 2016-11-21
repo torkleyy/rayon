@@ -2,6 +2,8 @@
 #![cfg_attr(test, feature(conservative_impl_trait))]
 
 extern crate deque;
+#[cfg(feature = "unstable")]
+extern crate futures;
 extern crate libc;
 extern crate num_cpus;
 extern crate rand;
@@ -10,6 +12,7 @@ extern crate rand;
 mod log;
 
 mod api;
+mod future;
 mod latch;
 mod join;
 mod job;

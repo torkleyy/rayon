@@ -15,6 +15,8 @@ rand = "0.3"
 num_cpus = "1.0"
 deque = "0.3.1"
 libc = "0.2.16"
+# FIXME only need this one for unstable
+futures = { git = "https://github.com/alexcrichton/futures-rs.git", rev = "f109e299dc514437e291f9861e287f8ed897c444" }
 
 [dev-dependencies]
 compiletest_rs = "0.2.1"
