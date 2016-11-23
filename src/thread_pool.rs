@@ -8,6 +8,7 @@ use log::Event::*;
 use rand::{self, Rng};
 use std::cell::Cell;
 use std::sync::{Arc, Condvar, Mutex, Once, ONCE_INIT};
+use std::process;
 use std::thread;
 use std::collections::VecDeque;
 use std::mem;
@@ -361,26 +362,33 @@ impl WorkerThread {
     /// Keep stealing jobs until the latch is set.
     #[cold]
     pub unsafe fn steal_until(&mut self, latch: &SpinLatch) {
-        let spawn_count = self.spawn_count.get();
+        // the code below should swallow all panics and hence never
+        // unwind; but if something does wrong, we want to abort,
+        // because otherwise other code in rayon may assume that the
+        // latch has been signaled, and hence that permit random
+        // memory accesses, which would be *very bad*
+        let guard = unwind::finally((), |_| process::exit(2222));
 
-        // If another thread stole our job when we panic, we must halt unwinding
-        // until that thread is finished using it.
-        let guard = unwind::finally(&latch, |latch| latch.spin());
+        // NB: In the case of `join` and `scope`, we actually know
+        // that, on entry, the thread-local deque must be empty. But
+        // in the case of `spawn_async`, we do not know
+        // that. Therefore, we want to prefer to pop things from the
+        // thread-local deque before we go off and steal work.
+        // Moreover, once we have stolen something, executing that may
+        // well populate our thread-local deque again.
         while !latch.probe() {
-            debug_assert!(self.spawn_count.get() == spawn_count);
-            if self.steal_and_execute() {
-                self.pop_spawned_jobs(spawn_count);
-            } else {
+            if !self.pop_or_steal_and_execute() {
                 thread::yield_now();
             }
         }
-        mem::forget(guard);
+
+        mem::forget(guard); // successful execution, do not abort
     }
 
     /// Try to steal a single job. If successful, execute it and
     /// return true. Else return false.
-    pub unsafe fn steal_and_execute(&mut self) -> bool {
-        if let Some(job) = self.steal_work() {
+    unsafe fn pop_or_steal_and_execute(&mut self) -> bool {
+        if let Some(job) = self.pop_or_steal() {
             job.execute(JobMode::Execute);
             true
         } else {
@@ -389,10 +397,13 @@ impl WorkerThread {
     }
 
     /// Steal a single job and return it.
-    unsafe fn steal_work(&mut self) -> Option<JobRef> {
-        // at no point should we try to steal unless our local deque is empty
-        debug_assert!(self.pop().is_none());
+    unsafe fn pop_or_steal(&mut self) -> Option<JobRef> {
+        // first check out local deque for work
+        if let Some(job_ref) = self.pop() {
+            return Some(job_ref);
+        }
 
+        // otherwise, try to steal
         if self.stealers.is_empty() {
             return None;
         }
@@ -453,15 +464,15 @@ unsafe fn main_loop(worker: Worker<JobRef>, registry: Arc<Registry>, index: usiz
             Work::None => {}
         }
 
-        if let Some(stolen_job) = worker_thread.steal_work() {
+        was_active = false;
+        while let Some(job) = worker_thread.pop_or_steal() {
+            // How do we want to prioritize injected jobs? this gives
+            // them very low priority, which seems good. Finish what
+            // we are doing before taking on new things.
             log!(StoleWork { worker: index });
             registry.start_working(index);
-            debug_assert!(worker_thread.spawn_count.get() == 0);
-            stolen_job.execute(JobMode::Execute);
-            worker_thread.pop_spawned_jobs(0);
+            job.execute(JobMode::Execute);
             was_active = true;
-        } else {
-            was_active = false;
         }
     }
 

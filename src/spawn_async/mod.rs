@@ -173,36 +173,9 @@ impl<F, R> SpawnAsync<F, R>
             // that would impose a (admittedly very, very small) bit
             // overhead onto the non-join path.
             thread_pool::in_worker(|owner_thread| {
-                // On a worker thread, we need to keep ourselves busy
-                // until the job has been executed (in which case,
-                // `probe()` will return true). This is a touch
-                // different from the `join` and `scope` idle loops,
-                // because we don't know that the job we are waiting
-                // for was pushed on the local deque.
-                //
-                // This means that, unlike in those cases, the fact
-                // that we are spinning does **not** mean that all the
-                // work was stolen our deque. So, the first thing we
-                // do is to pull work from the local deque -- if it is
-                // empty, then we go off and try to steal work from
-                // elsewhere. Note that executing this stolen work may
-                // itself cause things to get pushed on our deque, so
-                // after we steal we go back to searching our local
-                // deque again.
-                let owner_thread = owner_thread as *const WorkerThread as *mut WorkerThread;
                 unsafe {
-                    while !job.latch().probe() {
-                        match (*owner_thread).pop() {
-                            Some(job_ref) => {
-                                job_ref.execute(JobMode::Execute);
-                            }
-                            None => {
-                                if !(*owner_thread).steal_and_execute() {
-                                    thread::yield_now();
-                                }
-                            }
-                        }
-                    }
+                    let owner_thread = owner_thread as *const WorkerThread as *mut WorkerThread;
+                    (*owner_thread).steal_until(job.latch());
                 }
             });
         }
