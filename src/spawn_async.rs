@@ -77,6 +77,14 @@ struct AsyncJob<F, R>
     stack_job: StackJob<SpinLatch, F, R>,
 }
 
+unsafe impl<F, R> Send for AsyncJob<F, R>
+    where F: FnOnce() -> R + Send + 'static
+{ }
+
+unsafe impl<F, R> Sync for AsyncJob<F, R>
+    where F: FnOnce() -> R + Send + 'static
+{ }
+
 impl<F, R> AsyncJob<F, R>
     where F: FnOnce() -> R + Send + 'static
 {
@@ -157,6 +165,48 @@ impl<F, R> SpawnAsync<F, R>
     /// Blocks until the job is done. Once the job is complete,
     /// returns its result. Returns `None` if you have called this already.
     pub fn join(&mut self) -> Option<R> {
-        
+        if let Some(ref job) = self.job {
+            // Inject a job that will steal work until this task is
+            // done. This is not obviously the best approach: one
+            // could imagine instead CAS'ing in a port or something
+            // that the job can send to when it completes.  However,
+            // that would impose a (admittedly very, very small) bit
+            // overhead onto the non-join path.
+            thread_pool::in_worker(|owner_thread| {
+                // On a worker thread, we need to keep ourselves busy
+                // until the job has been executed (in which case,
+                // `probe()` will return true). This is a touch
+                // different from the `join` and `scope` idle loops,
+                // because we don't know that the job we are waiting
+                // for was pushed on the local deque.
+                //
+                // This means that, unlike in those cases, the fact
+                // that we are spinning does **not** mean that all the
+                // work was stolen our deque. So, the first thing we
+                // do is to pull work from the local deque -- if it is
+                // empty, then we go off and try to steal work from
+                // elsewhere. Note that executing this stolen work may
+                // itself cause things to get pushed on our deque, so
+                // after we steal we go back to searching our local
+                // deque again.
+                let owner_thread = owner_thread as *const WorkerThread as *mut WorkerThread;
+                unsafe {
+                    while !job.latch().probe() {
+                        match (*owner_thread).pop() {
+                            Some(job_ref) => {
+                                job_ref.execute(JobMode::Execute);
+                            }
+                            None => {
+                                if !(*owner_thread).steal_and_execute() {
+                                    thread::yield_now();
+                                }
+                            }
+                        }
+                    }
+                }
+            });
+        }
+
+        self.poll()
     }
 }

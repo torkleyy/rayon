@@ -28,8 +28,7 @@ pub fn join<A, B, RA, RB>(oper_a: A, oper_b: B) -> (RA, RB)
         let job_b = StackJob::new(oper_b, SpinLatch::new());
         (*worker_thread).push(job_b.as_job_ref());
 
-        // record how many async spawns have occurred on this thread
-        // before task A is executed
+        // record stack depth now that B is pushed (but before A executes)
         let spawn_count = (*worker_thread).current_spawn_count();
 
         // execute task a; hopefully b gets stolen

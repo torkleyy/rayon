@@ -222,16 +222,18 @@ pub struct WorkerThread {
     stealers: Vec<Stealer<JobRef>>,
     index: usize,
 
-    /// A counter tracking how many calls to `Scope::spawn` occurred
-    /// on the current thread; this is used by the scope code to
-    /// ensure that the depth of the local deque is maintained.
+    /// A counter tracking how many jobs have been pushed on the
+    /// current thread; this is used by the scope code to ensure that
+    /// the depth of the local deque is maintained.
     ///
     /// The actual logic here is a bit subtle. Perhaps more subtle
     /// than it has to be. The problem is this: if you have only join,
     /// then you can easily pair each push onto the deque with a pop.
     /// But when you have spawn, you push onto the deque without a
-    /// corresponding pop. The `spawn_count` is used to track how many
-    /// of these "unpaired pushes" have occurred.
+    /// corresponding pop. Thus we keep the `spawn_count` to track how
+    /// many jobs have been pushed. This is an upper-bound on the
+    /// depth of the local deque -- it is only an upper-bound since
+    /// thieves may have stolen things from the bottom of the stack.
     ///
     /// The basic pattern is that people record the spawned count
     /// before they execute a task (let's call it N). Then, if they
@@ -239,12 +241,13 @@ pub struct WorkerThread {
     /// they invoke `pop_spawned_jobs` with N. `pop_spawned_jobs` will
     /// pop things from the local deque and execute them until the
     /// spawn count drops to N, or the deque is empty, whichever
-    /// happens first. (Either way, it resets the spawn count to N.)
+    /// happens first.
     ///
     /// So e.g. join will push the right task, record the spawn count
     /// as N, run the left task, and then pop spawned jobs. Once pop
     /// spawned jobs returns, we can go ahead and try to pop the right
-    /// task -- it has either been stolen, or should be on the top of the deque.
+    /// task -- it has either been stolen, or should be on the top of
+    /// the deque.
     ///
     /// Similarly, `scope` will record the spawn count and run the
     /// main task.  It can then pop the spawned jobs. At this point,
@@ -254,6 +257,14 @@ pub struct WorkerThread {
     /// locally spawned tasks were popped, the only way that we are
     /// not all done is if one was stolen. If one was stolen, the
     /// stuff pushed before the scope was stolen too.
+    ///
+    /// The final variant is `spawn_async`. When we push the job here,
+    /// we naturally bump the spawn-count (it is a push). But if we
+    /// are blocking waiting for the job to complete, in this case we
+    /// just pop jobs until the local spawn count reaches 0. This
+    /// makes sense because, unlike with `join`, we are not waiting
+    /// until any particular task finishes, but rather until a latch
+    /// is set, so we might as well execute some local tasks.
     ///
     /// Finally, we have to make sure to pop spawned tasks after we
     /// steal, so as to maintain the invariant that our local deque is
@@ -306,15 +317,6 @@ impl WorkerThread {
         self.spawn_count.get()
     }
 
-    /// Increment the spawn count by 1.
-    ///
-    /// See the `spawn_count` field for an extensive comment on the
-    /// meaning of the spawn counter.
-    #[inline]
-    pub fn bump_spawn_count(&self) {
-        self.spawn_count.set(self.spawn_count.get() + 1);
-    }
-
     /// Pops spawned (async) jobs until our spawn count reaches
     /// `start_count` or the deque is empty. This routine is used to
     /// ensure that the local deque is "balanced".
@@ -323,12 +325,10 @@ impl WorkerThread {
     /// meaning of the spawn counter and use of this function.
     #[inline]
     pub unsafe fn pop_spawned_jobs(&self, start_count: usize) {
-        while self.spawn_count.get() != start_count {
+        while self.spawn_count.get() > start_count {
             if let Some(job_ref) = self.pop() {
-                self.spawn_count.set(self.spawn_count.get() - 1);
                 job_ref.execute(JobMode::Execute);
             } else {
-                self.spawn_count.set(start_count);
                 break;
             }
         }
@@ -336,6 +336,7 @@ impl WorkerThread {
 
     #[inline]
     pub unsafe fn push(&self, job: JobRef) {
+        self.spawn_count.set(self.spawn_count.get() + 1);
         self.worker.push(job);
     }
 
@@ -343,7 +344,18 @@ impl WorkerThread {
     /// stolen.
     #[inline]
     pub unsafe fn pop(&self) -> Option<JobRef> {
-        self.worker.pop()
+        let spawn_count = self.spawn_count.get();
+        if spawn_count > 0 {
+            if let Some(result) = self.worker.pop() {
+                self.spawn_count.set(spawn_count - 1);
+                Some(result)
+            } else {
+                self.spawn_count.set(0);
+                None
+            }
+        } else {
+            None
+        }
     }
 
     /// Keep stealing jobs until the latch is set.
@@ -355,15 +367,25 @@ impl WorkerThread {
         // until that thread is finished using it.
         let guard = unwind::finally(&latch, |latch| latch.spin());
         while !latch.probe() {
-            if let Some(job) = self.steal_work() {
-                debug_assert!(self.spawn_count.get() == spawn_count);
-                job.execute(JobMode::Execute);
+            debug_assert!(self.spawn_count.get() == spawn_count);
+            if self.steal_and_execute() {
                 self.pop_spawned_jobs(spawn_count);
             } else {
                 thread::yield_now();
             }
         }
         mem::forget(guard);
+    }
+
+    /// Try to steal a single job. If successful, execute it and
+    /// return true. Else return false.
+    pub unsafe fn steal_and_execute(&mut self) -> bool {
+        if let Some(job) = self.steal_work() {
+            job.execute(JobMode::Execute);
+            true
+        } else {
+            false
+        }
     }
 
     /// Steal a single job and return it.

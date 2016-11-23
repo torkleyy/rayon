@@ -265,7 +265,6 @@ impl<'scope> Scope<'scope> {
             debug_assert!(!WorkerThread::current().is_null());
 
             let worker_thread = &*worker_thread;
-            worker_thread.bump_spawn_count();
             worker_thread.push(job_ref);
         }
     }
