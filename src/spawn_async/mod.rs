@@ -210,3 +210,6 @@ impl<F, R> SpawnAsync<F, R>
         self.poll()
     }
 }
+
+#[cfg(test)]
+mod test;
