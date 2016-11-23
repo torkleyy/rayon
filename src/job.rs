@@ -4,7 +4,7 @@ use std::cell::UnsafeCell;
 use std::mem;
 use unwind;
 
-enum JobResult<T> {
+pub enum JobResult<T> {
     None,
     Ok(T),
     Panic(Box<Any + Send>),
@@ -90,10 +90,13 @@ impl<L: Latch, F, R> StackJob<L, F, R>
     }
 
     pub unsafe fn into_result(self) -> R {
-        match self.result.into_inner() {
-            JobResult::None => unreachable!(),
-            JobResult::Ok(x) => x,
-            JobResult::Panic(x) => unwind::resume_unwinding(x),
+        self.result.into_inner().into_return_value()
+    }
+
+    pub fn take_result(&mut self) -> JobResult<R> {
+        unsafe {
+            let result: *mut JobResult<R> = self.result.get();
+            mem::replace(&mut *result, JobResult::None)
         }
     }
 }
@@ -156,5 +159,19 @@ impl<BODY> Job for HeapJob<BODY>
         let this: Box<Self> = mem::transmute(this);
         let job = (*this.job.get()).take().unwrap();
         job(mode);
+    }
+}
+
+impl<T> JobResult<T> {
+    /// Convert the `JobResult` for a job that has finished (and hence
+    /// its JobResult is populated) into its return value.
+    ///
+    /// NB. This will panic if the job panicked.
+    pub fn into_return_value(self) -> T {
+        match self {
+            JobResult::None => unreachable!(),
+            JobResult::Ok(x) => x,
+            JobResult::Panic(x) => unwind::resume_unwinding(x),
+        }
     }
 }
