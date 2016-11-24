@@ -239,11 +239,11 @@ pub struct WorkerThread {
     /// than it has to be. The problem is this: if you have only have
     /// calls to `join()`, then you can easily pair each push onto the
     /// deque with a pop.  But when you have calls to `spawn()`, you
-    /// push onto the deque without a corresponding pop (worse, if you
-    /// have `spawn_async()`). Thus we keep the `spawn_count` to track
-    /// how many jobs have been pushed. This is an upper-bound on the
-    /// depth of the local deque -- it is only an upper-bound since
-    /// thieves may have stolen things from the bottom of the stack.
+    /// push onto the deque without a corresponding pop. Thus we keep
+    /// the `spawn_count` to track how many jobs have been
+    /// pushed. This is an upper-bound on the depth of the local deque
+    /// -- it is only an upper-bound since thieves may have stolen
+    /// things from the bottom of the stack.
     ///
     /// The basic pattern is that people record the spawned count
     /// before they execute a task (let's call it N). Then, if they
@@ -261,7 +261,7 @@ pub struct WorkerThread {
     /// the deque.
     ///
     /// Similarly, `scope` will record the spawn count and run the
-    /// main task.  It can then pop the spawned jobs. At this point,
+    /// main task. It can then pop the spawned jobs. At this point,
     /// until the "all done!" latch is set, it can go and steal from
     /// other people, confident in the knowledge that the local deque
     /// is empty. This is a bit subtle: basically, since all the
@@ -269,6 +269,59 @@ pub struct WorkerThread {
     /// not all done is if one was stolen. If one was stolen, the
     /// stuff pushed before the scope was stolen too.
     ///
+    /// # `spawn_async()`
+    ///
+    /// `spawn_async()` adds a new twist. Both `join()` and
+    /// `scope()/spawn()` meet the assumption that nobody ever has a
+    /// reason to block except if something is stolen,
+    /// essentially. (This is (interestingly) also true with futures.)
+    /// This assumption means that nobody ever needs to pop more than
+    /// they (or their callees) pushed, which in turn means everyone
+    /// can maintain the logical stack depth just be incrementing on
+    /// `push()` and popping on `pop()`. So, if `join()` pushes the
+    /// RHS and records the (logical) stack depth as D, it knows that
+    /// at all points the (logical) stack depth will remain >= D --
+    /// that is, the LHS may have pushed some stacks (which will have
+    /// increased logical stack depth), but it will never have cause
+    /// to try to pop more than it has pushed -- **even if it was
+    /// stealing**. (Put another way, it would only steal if the stack
+    /// were empty due to other thieves.) Therefore, if stack depth is
+    /// D, *and* `join()` can pop, then we know that the thing we pop
+    /// is the RHS, and not something else.
+    ///
+    /// But `spawn_async()` kind of messes with that logic -- or at
+    /// least blocking does. Blocking on a `spawn_async()` basically
+    /// means we may wind up blocking not because someone stole from
+    /// us but **just because**. Therefore, we may consider stealing
+    /// from our own deque in order to make good use of our time. This
+    /// causes problems with the 'logical stack depth' concept.
+    ///
+    /// Consider:
+    ///
+    /// - `join` comes in with stack depth 0
+    /// - `join` pushes RHS to stack depth 1
+    /// - LHS calls `wait`; while waiting:
+    ///     - pop RHS, dropping stack depth to 0
+    ///     - steal another task, execute it; this task pushes 1 task `X`
+    ///     - up, signal is set, break
+    /// - `join` reads stack depth as 1, pops task `X`, assumes it is equal to RHS
+    ///
+    /// The way to resolve these is to observe that, while
+    /// `spawn_async()` is blocked in `wait()`, it is not a normal
+    /// participant in the current thread.  In a sense, it is a *thief
+    /// from its own thread*. It just happens to be a thief that is
+    /// stealing from the *top* of the stack instead of the bottom (by
+    /// popping). Therefore, when we pop while stealing, we don't
+    /// adjust the logical stack depth.
+    ///
+    /// XXX -- wait, does this make SENSE?? seems pretty flawed.  I
+    /// mean if I we pop RHS (but leave "logical stack depth" as D),
+    /// then push something (logical stack depth is now D+1), then
+    /// join may pop that (logical stack depth is D) and then pop its
+    /// parent's job and think it is its own, right? I'm guessing I
+    /// don't observe this only because we're not doing enough
+    /// `spawn_async` sort of stuff.
+
     /// The final variant is `spawn_async()`. When we push the job
     /// here, we naturally bump the spawn-count (it is a push). But if
     /// we are blocking waiting for the job to complete, in this case
@@ -370,35 +423,6 @@ impl WorkerThread {
     /// Keep stealing jobs until the latch is set.
     #[cold]
     pub unsafe fn steal_until<L: Latch>(&mut self, latch: &L) {
-        // XXX There is a kind of fundamental challenge with injecting
-        // `spawn_async` here. At least, if we want `join` to keep
-        // working the way it does. Currently the logic of `join` is
-        // based on the assumption that nobody ever has a reason to
-        // block except if something is stolen, essentially. (This is
-        // (interestingly) also true with futures.) This allows us to
-        // assume that nobody ever needs to `pop()` more than they (or
-        // their callees) pushed, which in turn means everyone can
-        // maintain the logical stack depth. This allows `join()` to
-        // call `pop()` and know that if it gets back `Some(_)`, it is
-        // its RHS.
-        //
-        // But `spawn_async()` kind of messes with that logic -- or at
-        // least blocking does. Blocking on a `spawn_async()`
-        // basically means we may wind up blocking not because someone
-        // stole from us but **just because**. Therefore, we may
-        // consider stealing from our own deque. This causes
-        // problems with the 'logical stack depth' concept.
-        //
-        // Consider:
-        //
-        // - `join` comes in with stack depth 0
-        // - `join` pushes RHS to stack depth 1
-        // - LHS calls `wait`; while waiting:
-        //     - pop RHS, dropping stack depth to 0
-        //     - steal another task, execute it; this task pushes 1 task `X`
-        //     - up, signal is set, break
-        // - `join` reads stack depth as 1, pops task `X`, assumes it is equal to RHS
-
         // the code below should swallow all panics and hence never
         // unwind; but if something does wrong, we want to abort,
         // because otherwise other code in rayon may assume that the
@@ -438,8 +462,10 @@ impl WorkerThread {
     unsafe fn pop_or_steal(&mut self) -> Option<JobRef> {
         // first check out local deque for work
         if let Some(job_ref) = self.worker.pop() { // (*)
-            // (*) NB -- DO NOT adjust spawn count
             return Some(job_ref);
+
+            // (*) NB: we DO NOT adjust spawn count when stealing; see
+            // the documentation on `spawn_count` for details.
         }
 
         // otherwise, try to steal
