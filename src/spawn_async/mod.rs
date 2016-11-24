@@ -1,5 +1,5 @@
 #[allow(unused_imports)]
-use latch::SpinLatch;
+use latch::{Latch, SpinLatch};
 use job::{Job, StackJob, JobResult, JobRef, JobMode};
 use std::mem;
 use std::sync::Arc;
