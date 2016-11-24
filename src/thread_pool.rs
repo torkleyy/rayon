@@ -6,7 +6,7 @@ use latch::{Latch, LockLatch};
 #[allow(unused_imports)]
 use log::Event::*;
 use rand::{self, Rng};
-use std::cell::Cell;
+use std::cell::{Cell, UnsafeCell};
 use std::sync::{Arc, Condvar, Mutex, Once, ONCE_INIT};
 use std::process;
 use std::thread;
@@ -296,7 +296,7 @@ pub struct WorkerThread {
     spawn_count: Cell<usize>,
 
     /// A weak random number generator.
-    rng: rand::XorShiftRng,
+    rng: UnsafeCell<rand::XorShiftRng>,
 
     registry: Arc<Registry>,
 }
@@ -394,7 +394,7 @@ impl WorkerThread {
 
     /// Keep stealing jobs until the latch is set.
     #[cold]
-    pub unsafe fn steal_until<L: Latch>(&mut self, latch: &L) {
+    pub unsafe fn steal_until<L: Latch>(&self, latch: &L) {
         // we only ever try to steal if we've exhausted our local work
         debug_assert!(self.worker.pop().is_none());
 
@@ -430,7 +430,7 @@ impl WorkerThread {
 
     /// Try to steal a single job. If successful, execute it and
     /// return true. Else return false.
-    unsafe fn steal_and_execute(&mut self) -> bool {
+    unsafe fn steal_and_execute(&self) -> bool {
         if let Some(job) = self.steal() {
             job.execute(JobMode::Execute);
             true
@@ -444,7 +444,7 @@ impl WorkerThread {
     /// This is only used in the main worker loop: code elsewhere
     /// never pops indiscriminantly, but always with some notion of
     /// the current stack depth.
-    unsafe fn pop_or_steal(&mut self) -> Option<JobRef> {
+    unsafe fn pop_or_steal(&self) -> Option<JobRef> {
         self.pop().or_else(|| self.steal())
     }
 
@@ -452,7 +452,7 @@ impl WorkerThread {
     ///
     /// This should only be done as a last resort, when there is no
     /// local work to do.
-    unsafe fn steal(&mut self) -> Option<JobRef> {
+    unsafe fn steal(&self) -> Option<JobRef> {
         // we only steal when we don't have any work to do locally
         debug_assert!(self.worker.pop().is_none());
 
@@ -460,7 +460,15 @@ impl WorkerThread {
         if self.stealers.is_empty() {
             return None;
         }
-        let start = self.rng.next_u32() % self.stealers.len() as u32;
+
+        let start = unsafe {
+            // OK to use this UnsafeCell because (a) this data is
+            // confined to current thread, as WorkerThread is not Send
+            // nor Sync and (b) rand crate will not call back into
+            // this method.
+            let rng = &mut *self.rng.get();
+            rng.next_u32() % self.stealers.len() as u32
+        };
         let (lo, hi) = self.stealers.split_at(start as usize);
         hi.iter()
             .chain(lo)
@@ -493,7 +501,7 @@ unsafe fn main_loop(worker: Worker<JobRef>, registry: Arc<Registry>, index: usiz
         stealers: stealers,
         index: index,
         spawn_count: Cell::new(0),
-        rng: rand::weak_rng(),
+        rng: UnsafeCell::new(rand::weak_rng()),
         registry: registry.clone(),
     };
     worker_thread.set_current();
