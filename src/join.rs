@@ -95,7 +95,7 @@ unsafe fn join_inject<A, B, RA, RB>(oper_a: A, oper_b: B) -> (RA, RB)
     let job_a = StackJob::new(oper_a, LockLatch::new());
     let job_b = StackJob::new(oper_b, LockLatch::new());
 
-    thread_pool::get_registry().inject(&[job_a.as_job_ref(), job_b.as_job_ref()]);
+    thread_pool::global_registry().inject(&[job_a.as_job_ref(), job_b.as_job_ref()]);
 
     job_a.latch.wait();
     job_b.latch.wait();

@@ -1,5 +1,4 @@
 use std::mem;
-use std::sync::Arc;
 
 pub fn leak<T>(v: T) -> &'static T {
     unsafe {

@@ -59,7 +59,7 @@ pub fn spawn_async<F, R>(func: F) -> SpawnAsync<F, R>
         let job_ref = AsyncJob::as_job_ref(async_job.clone());
         let worker_thread = WorkerThread::current();
         if worker_thread.is_null() {
-            thread_pool::get_registry().inject(&[job_ref]);
+            thread_pool::global_registry().inject(&[job_ref]);
         } else {
             (*worker_thread).push(job_ref);
         }

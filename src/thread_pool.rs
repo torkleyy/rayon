@@ -39,20 +39,9 @@ static THE_REGISTRY_SET: Once = ONCE_INIT;
 /// Starts the worker threads (if that has not already happened). If
 /// initialization has not already occurred, use the default
 /// configuration.
-pub fn get_registry() -> &'static Arc<Registry> {
+pub fn global_registry() -> &'static Arc<Registry> {
     THE_REGISTRY_SET.call_once(|| unsafe { init_registry(Configuration::new()) });
     unsafe { THE_REGISTRY.unwrap() }
-}
-
-/// Gets a handle to the current registry. If we are in a worker, this
-/// is the worker's registry, otherwise its the global registry.
-pub fn current_registry() -> Arc<Registry> {
-    let worker = WorkerThread::current();
-    if worker.is_null() {
-        get_registry()
-    } else unsafe {
-        (*worker).registry().clone()
-    }
 }
 
 /// Starts the worker threads (if that has not already happened) with
@@ -78,6 +67,19 @@ enum Work {
 }
 
 impl Registry {
+    /// Gets a handle to the current registry. If we are in a worker, this
+    /// is the worker's registry, otherwise its the global registry.
+    pub fn current() -> Arc<Registry> {
+        unsafe {
+            let worker = WorkerThread::current();
+            if worker.is_null() {
+                global_registry().clone()
+            } else {
+                (*worker).registry().clone()
+            }
+        }
+    }
+
     pub fn new(num_threads: Option<usize>) -> Arc<Registry> {
         let limit_value = match num_threads {
             Some(value) => value,
@@ -100,13 +102,6 @@ impl Registry {
         }
 
         registry
-    }
-
-    /// Returns an opaque identifier for this registry.
-    pub fn id(&self) -> RegistryId {
-        // We can rely on `self` not to change since we only ever create
-        // registries that are boxed up in an `Arc` (see `new()` above).
-        RegistryId { addr: self as *const Self as usize }
     }
 
     pub fn num_threads(&self) -> usize {
@@ -205,11 +200,6 @@ impl Registry {
         }
         self.work_available.notify_all();
     }
-}
-
-#[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord)]
-pub struct RegistryId {
-    addr: usize
 }
 
 impl RegistryState {
@@ -567,6 +557,6 @@ unsafe fn in_worker_cold<OP>(op: OP)
     // never run from a worker thread; just shifts over into worker threads
     debug_assert!(WorkerThread::current().is_null());
     let job = StackJob::new(|| in_worker(op), LockLatch::new());
-    get_registry().inject(&[job.as_job_ref()]);
+    global_registry().inject(&[job.as_job_ref()]);
     job.latch.wait();
 }
