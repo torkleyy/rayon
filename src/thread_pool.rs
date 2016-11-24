@@ -235,100 +235,51 @@ pub struct WorkerThread {
     /// RHS was stolen) or the RHS task. This lets join avoid using a
     /// latch/virtual-call in the case where `Some` is returned.
     ///
-    /// The actual logic here is a bit subtle. Perhaps more subtle
-    /// than it has to be. The problem is this: if you have only have
-    /// calls to `join()`, then you can easily pair each push onto the
-    /// deque with a pop.  But when you have calls to `spawn()`, you
-    /// push onto the deque without a corresponding pop. Thus we keep
-    /// the `spawn_count` to track how many jobs have been
-    /// pushed. This is an upper-bound on the depth of the local deque
-    /// -- it is only an upper-bound since thieves may have stolen
-    /// things from the bottom of the stack.
+    /// The actual logic here is a bit subtle. It relies on the key
+    /// assumption that nobody has a reason to block unless someone
+    /// else has stolen a task from their local deque. Put another
+    /// way, if I push N tasks, then I would never try to pop more
+    /// than N tasks. This is because, if I pop all N of my tasks,
+    /// then my work is done and I am ready to return. If fail to pop
+    /// them all, then this is because another thread stole them, in
+    /// which case I have no reason to pop, since the deque is empty.
     ///
-    /// The basic pattern is that people record the spawned count
-    /// before they execute a task (let's call it N). Then, if they
-    /// want to pop the local tasks that this task may have spawned,
-    /// they invoke `pop_spawned_jobs` with N. `pop_spawned_jobs` will
-    /// pop things from the local deque and execute them until the
-    /// spawn count drops to N, or the deque is empty, whichever
-    /// happens first (in the latter case, the spawn count is reset to
-    /// N).
+    /// Therefore, we can keep a *logical stack counter* at all
+    /// points, and we know that whenever we execute a job, it can
+    /// only increase this counter or leave it the same. A job J
+    /// should never pop things that J (or one of its callees) did not
+    /// itself push.
     ///
-    /// So e.g. join will push the right task, record the spawn count
-    /// as N, run the left task, and then pop spawned jobs. Once pop
-    /// spawned jobs returns, we can go ahead and try to pop the right
-    /// task -- it has either been stolen, or should be on the top of
-    /// the deque.
+    /// This allows `join()` to record the stack depth as D; push the
+    /// RHS (increasing stack depth to D+1) and execute the LHS. After
+    /// executing the LHS, the new logical stack is D' > D. So if we
+    /// are able to pop D' - D things, the last thing popped must be
+    /// the RHS (note, though, that it may have been stolen, so we may
+    /// not able to pop all those things).
     ///
-    /// Similarly, `scope` will record the spawn count and run the
-    /// main task. It can then pop the spawned jobs. At this point,
-    /// until the "all done!" latch is set, it can go and steal from
-    /// other people, confident in the knowledge that the local deque
-    /// is empty. This is a bit subtle: basically, since all the
-    /// locally spawned tasks were popped, the only way that we are
-    /// not all done is if one was stolen. If one was stolen, the
-    /// stuff pushed before the scope was stolen too.
+    /// One operation that this invariant disallows (or least
+    /// makes...inconvenient) is a blocking join of random tasks in
+    /// the Rayon queue (i.e., ones that your current task did not
+    /// transitively spawn). If we permitted you to join some random
+    /// task, it may not have been spawned by your local deque. As a
+    /// result, while you are waiting, you would be inclined to pop
+    /// items from your local deque, and maybe steal from others.  But
+    /// in that case you might easily pop things that you did not
+    /// push, violating the invariant. So we could permit this
+    /// operation, but rather than *popping* from the deque you would
+    /// steal from it.  The whole thing is just inefficient, though,
+    /// so we don't offer that API, and instead encourage the use of
+    /// futures.
     ///
-    /// # `spawn_async()`
-    ///
-    /// `spawn_async()` adds a new twist. Both `join()` and
-    /// `scope()/spawn()` meet the assumption that nobody ever has a
-    /// reason to block except if something is stolen,
-    /// essentially. (This is (interestingly) also true with futures.)
-    /// This assumption means that nobody ever needs to pop more than
-    /// they (or their callees) pushed, which in turn means everyone
-    /// can maintain the logical stack depth just be incrementing on
-    /// `push()` and popping on `pop()`. So, if `join()` pushes the
-    /// RHS and records the (logical) stack depth as D, it knows that
-    /// at all points the (logical) stack depth will remain >= D --
-    /// that is, the LHS may have pushed some stacks (which will have
-    /// increased logical stack depth), but it will never have cause
-    /// to try to pop more than it has pushed -- **even if it was
-    /// stealing**. (Put another way, it would only steal if the stack
-    /// were empty due to other thieves.) Therefore, if stack depth is
-    /// D, *and* `join()` can pop, then we know that the thing we pop
-    /// is the RHS, and not something else.
-    ///
-    /// But `spawn_async()` kind of messes with that logic -- or at
-    /// least blocking does. Blocking on a `spawn_async()` basically
-    /// means we may wind up blocking not because someone stole from
-    /// us but **just because**. Therefore, we may consider stealing
-    /// from our own deque in order to make good use of our time. This
-    /// causes problems with the 'logical stack depth' concept.
-    ///
-    /// Consider:
+    /// A concrete example of how things could go wrong:
     ///
     /// - `join` comes in with stack depth 0
     /// - `join` pushes RHS to stack depth 1
-    /// - LHS calls `wait`; while waiting:
-    ///     - pop RHS, dropping stack depth to 0
+    /// - LHS calls `wait` on some random job; while waiting:
+    ///     - we pop RHS, dropping stack depth to 0
     ///     - steal another task, execute it; this task pushes 1 task `X`
     ///     - up, signal is set, break
     /// - `join` reads stack depth as 1, pops task `X`, assumes it is equal to RHS
-    ///
-    /// The way to resolve these is to observe that, while
-    /// `spawn_async()` is blocked in `wait()`, it is not a normal
-    /// participant in the current thread.  In a sense, it is a *thief
-    /// from its own thread*. It just happens to be a thief that is
-    /// stealing from the *top* of the stack instead of the bottom (by
-    /// popping). Therefore, when we pop while stealing, we don't
-    /// adjust the logical stack depth.
-    ///
-    /// XXX -- wait, does this make SENSE?? seems pretty flawed.  I
-    /// mean if I we pop RHS (but leave "logical stack depth" as D),
-    /// then push something (logical stack depth is now D+1), then
-    /// join may pop that (logical stack depth is D) and then pop its
-    /// parent's job and think it is its own, right? I'm guessing I
-    /// don't observe this only because we're not doing enough
-    /// `spawn_async` sort of stuff.
-
-    /// The final variant is `spawn_async()`. When we push the job
-    /// here, we naturally bump the spawn-count (it is a push). But if
-    /// we are blocking waiting for the job to complete, in this case
-    /// we just pop jobs until the local spawn count reaches 0. This
-    /// makes sense because, unlike with `join()`, we are not waiting
-    /// until any particular task finishes, but rather until a latch
-    /// is set, so we might as well execute some local tasks.
     spawn_count: Cell<usize>,
 
     /// A weak random number generator.
@@ -423,6 +374,14 @@ impl WorkerThread {
     /// Keep stealing jobs until the latch is set.
     #[cold]
     pub unsafe fn steal_until<L: Latch>(&mut self, latch: &L) {
+        // we only ever try to steal if we've exhausted our local work
+        debug_assert!(self.worker.pop().is_none());
+
+        // load initial logical depth of our local deque; this will be
+        // used later to check if stolen jobs pushed work we might
+        // want to do
+        let spawn_count = self.spawn_count.get();
+
         // the code below should swallow all panics and hence never
         // unwind; but if something does wrong, we want to abort,
         // because otherwise other code in rayon may assume that the
@@ -430,16 +389,17 @@ impl WorkerThread {
         // memory accesses, which would be *very bad*
         let guard = unwind::finally((), |_| process::exit(2222));
 
-        // NB: In the case of `join` and `scope`, we actually know
-        // that, on entry, the thread-local deque must be empty
-        // (though the spawn count may not be zero). But in the case
-        // of `spawn_async`, we do not know that. Therefore, we want
-        // to prefer to pop things from the thread-local deque before
-        // we go off and steal work.  Moreover, once we have stolen
-        // something, executing that may well populate our
-        // thread-local deque again.
         while !latch.probe() {
-            if !self.pop_or_steal_and_execute() {
+            // check if something we stole pushed new local jobs
+            if self.spawn_count.get() > spawn_count {
+                if let Some(job) = self.pop() {
+                    job.execute(JobMode::Execute);
+                    continue;
+                }
+            }
+
+            // if not, try to steal some more
+            if !self.steal_and_execute() {
                 thread::yield_now();
             }
         }
@@ -449,8 +409,8 @@ impl WorkerThread {
 
     /// Try to steal a single job. If successful, execute it and
     /// return true. Else return false.
-    unsafe fn pop_or_steal_and_execute(&mut self) -> bool {
-        if let Some(job) = self.pop_or_steal() {
+    unsafe fn steal_and_execute(&mut self) -> bool {
+        if let Some(job) = self.steal() {
             job.execute(JobMode::Execute);
             true
         } else {
@@ -458,15 +418,22 @@ impl WorkerThread {
         }
     }
 
-    /// Steal a single job and return it.
+    /// Try to pop a job locally; if none is found, try to steal a job.
+    ///
+    /// This is only used in the main worker loop: code elsewhere
+    /// never pops indiscriminantly, but always with some notion of
+    /// the current stack depth.
     unsafe fn pop_or_steal(&mut self) -> Option<JobRef> {
-        // first check out local deque for work
-        if let Some(job_ref) = self.worker.pop() { // (*)
-            return Some(job_ref);
+        self.pop().or_else(|| self.steal())
+    }
 
-            // (*) NB: we DO NOT adjust spawn count when stealing; see
-            // the documentation on `spawn_count` for details.
-        }
+    /// Try to steal a single job and return it.
+    ///
+    /// This should only be done as a last resort, when there is no
+    /// local work to do.
+    unsafe fn steal(&mut self) -> Option<JobRef> {
+        // we only steal when we don't have any work to do locally
+        debug_assert!(self.worker.pop().is_none());
 
         // otherwise, try to steal
         if self.stealers.is_empty() {
