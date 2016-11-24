@@ -361,7 +361,7 @@ impl WorkerThread {
 
     /// Keep stealing jobs until the latch is set.
     #[cold]
-    pub unsafe fn steal_until(&mut self, latch: &SpinLatch) {
+    pub unsafe fn steal_until<L: Latch>(&mut self, latch: &L) {
         // the code below should swallow all panics and hence never
         // unwind; but if something does wrong, we want to abort,
         // because otherwise other code in rayon may assume that the
