@@ -1,5 +1,5 @@
 #[allow(unused_imports)]
-use latch::{Latch, SpinLatch};
+use latch::{Latch, SpinLatch, UpgradeLatch};
 use job::{Job, StackJob, JobResult, JobRef, JobMode};
 use std::mem;
 use std::sync::Arc;
@@ -74,7 +74,7 @@ pub fn spawn_async<F, R>(func: F) -> SpawnAsync<F, R>
 struct AsyncJob<F, R>
     where F: FnOnce() -> R + Send + 'static
 {
-    stack_job: StackJob<SpinLatch, F, R>,
+    stack_job: StackJob<UpgradeLatch, F, R>,
 }
 
 unsafe impl<F, R> Send for AsyncJob<F, R>
@@ -89,7 +89,7 @@ impl<F, R> AsyncJob<F, R>
     where F: FnOnce() -> R + Send + 'static
 {
     pub fn new(func: F) -> Self {
-        AsyncJob { stack_job: StackJob::new(func, SpinLatch::new()) }
+        AsyncJob { stack_job: StackJob::new(func, UpgradeLatch::new()) }
     }
 
     /// Creates a `JobRef` from this job -- note that this hides all
@@ -100,7 +100,7 @@ impl<F, R> AsyncJob<F, R>
         JobRef::new(this)
     }
 
-    pub fn latch(&self) -> &SpinLatch {
+    pub fn latch(&self) -> &UpgradeLatch {
         &self.stack_job.latch
     }
 
@@ -166,18 +166,14 @@ impl<F, R> SpawnAsync<F, R>
     /// returns its result. Returns `None` if you have called this already.
     pub fn join(&mut self) -> Option<R> {
         if let Some(ref job) = self.job {
-            // Inject a job that will steal work until this task is
-            // done. This is not obviously the best approach: one
-            // could imagine instead CAS'ing in a port or something
-            // that the job can send to when it completes.  However,
-            // that would impose a (admittedly very, very small) bit
-            // overhead onto the non-join path.
-            thread_pool::in_worker(|owner_thread| {
-                unsafe {
-                    let owner_thread = owner_thread as *const WorkerThread as *mut WorkerThread;
+            unsafe {
+                let owner_thread = WorkerThread::current();
+                if !owner_thread.is_null() {
                     (*owner_thread).steal_until(job.latch());
+                } else {
+                    job.latch().wait();
                 }
-            });
+            }
         }
 
         self.poll()

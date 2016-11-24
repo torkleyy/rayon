@@ -2,7 +2,7 @@ use Configuration;
 use deque;
 use deque::{Worker, Stealer, Stolen};
 use job::{JobRef, JobMode, StackJob};
-use latch::{Latch, LockLatch, SpinLatch};
+use latch::{Latch, LockLatch};
 #[allow(unused_imports)]
 use log::Event::*;
 use rand::{self, Rng};
