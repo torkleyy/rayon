@@ -20,6 +20,9 @@ pub fn join<A, B, RA, RB>(oper_a: A, oper_b: B) -> (RA, RB)
             return join_inject(oper_a, oper_b);
         }
 
+        #[cfg(debug_assertions)]
+        let start_spawn_count = (*worker_thread).current_spawn_count();
+
         log!(Join { worker: (*worker_thread).index() });
 
         // create virtual wrapper for task b; this all has to be
@@ -47,18 +50,35 @@ pub fn join<A, B, RA, RB>(oper_a: A, oper_b: B) -> (RA, RB)
 
         // before we can try to pop b, we have to first pop off any async spawns
         // that have occurred on this thread
+        //
+        // NB-- it's not obvious that this is the right strategy. This
+        // corresponds to doing the LHS pushing some jobs with
+        // `scope.spawn()` (for a scope that encloses the current call
+        // to `join()`). This call here forces us to execute those
+        // jobs before trying to pop the RHS. This is consistent with
+        // the "depth-first" strategy, but it's not obvious where to
+        // place spawned jobs in that tree -- in some sense they may
+        // better belong with their scope, in which case it seems
+        // better to try to execute RHS before those jobs. We could
+        // implement this in various ways.
         (*worker_thread).pop_spawned_jobs(spawn_count);
 
         // if b was not stolen, do it ourselves, else wait for the thief to finish
         let result_b;
-        if (*worker_thread).pop().is_some() {
+        if let Some(j) = (*worker_thread).pop() {
             log!(PoppedJob { worker: (*worker_thread).index() });
+            debug_assert_eq!(job_b.as_job_ref(), j);
             result_b = job_b.run_inline(); // not stolen, let's do it!
         } else {
             log!(LostJob { worker: (*worker_thread).index() });
             (*worker_thread).steal_until(&job_b.latch); // stolen, wait for them to finish
             result_b = job_b.into_result();
         }
+
+        // job b, or stolen jobs, may have pushed things; but none of
+        // them should have (logically, anyway) popped things from
+        // logical depth
+        debug_assert!((*worker_thread).current_spawn_count() >= start_spawn_count);
 
         // now result_b should be initialized
         (result_a, result_b)

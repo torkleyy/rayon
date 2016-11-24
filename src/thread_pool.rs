@@ -223,16 +223,25 @@ pub struct WorkerThread {
     stealers: Vec<Stealer<JobRef>>,
     index: usize,
 
-    /// A counter tracking how many jobs have been pushed on the
-    /// current thread; this is used by the scope code to ensure that
-    /// the depth of the local deque is maintained.
+    /// A counter tracking the "logical stack depth" for our local
+    /// deque -- basically, what it *would* be, if other people
+    /// weren't stealing from the top. Every time we push onto the
+    /// deque, we increment this counter, and everytime we pop from
+    /// the deque, we decrement it.
+    ///
+    /// Basically the whole purpose of this counter is so that
+    /// `join()` can call `worker.pop()` for its RHS and know with
+    /// confidence that the thing it gets back is either `None` (if
+    /// RHS was stolen) or the RHS task. This lets join avoid using a
+    /// latch/virtual-call in the case where `Some` is returned.
     ///
     /// The actual logic here is a bit subtle. Perhaps more subtle
-    /// than it has to be. The problem is this: if you have only join,
-    /// then you can easily pair each push onto the deque with a pop.
-    /// But when you have spawn, you push onto the deque without a
-    /// corresponding pop. Thus we keep the `spawn_count` to track how
-    /// many jobs have been pushed. This is an upper-bound on the
+    /// than it has to be. The problem is this: if you have only have
+    /// calls to `join()`, then you can easily pair each push onto the
+    /// deque with a pop.  But when you have calls to `spawn()`, you
+    /// push onto the deque without a corresponding pop (worse, if you
+    /// have `spawn_async()`). Thus we keep the `spawn_count` to track
+    /// how many jobs have been pushed. This is an upper-bound on the
     /// depth of the local deque -- it is only an upper-bound since
     /// thieves may have stolen things from the bottom of the stack.
     ///
@@ -242,7 +251,8 @@ pub struct WorkerThread {
     /// they invoke `pop_spawned_jobs` with N. `pop_spawned_jobs` will
     /// pop things from the local deque and execute them until the
     /// spawn count drops to N, or the deque is empty, whichever
-    /// happens first.
+    /// happens first (in the latter case, the spawn count is reset to
+    /// N).
     ///
     /// So e.g. join will push the right task, record the spawn count
     /// as N, run the left task, and then pop spawned jobs. Once pop
@@ -259,17 +269,13 @@ pub struct WorkerThread {
     /// not all done is if one was stolen. If one was stolen, the
     /// stuff pushed before the scope was stolen too.
     ///
-    /// The final variant is `spawn_async`. When we push the job here,
-    /// we naturally bump the spawn-count (it is a push). But if we
-    /// are blocking waiting for the job to complete, in this case we
-    /// just pop jobs until the local spawn count reaches 0. This
-    /// makes sense because, unlike with `join`, we are not waiting
+    /// The final variant is `spawn_async()`. When we push the job
+    /// here, we naturally bump the spawn-count (it is a push). But if
+    /// we are blocking waiting for the job to complete, in this case
+    /// we just pop jobs until the local spawn count reaches 0. This
+    /// makes sense because, unlike with `join()`, we are not waiting
     /// until any particular task finishes, but rather until a latch
     /// is set, so we might as well execute some local tasks.
-    ///
-    /// Finally, we have to make sure to pop spawned tasks after we
-    /// steal, so as to maintain the invariant that our local deque is
-    /// empty when we go to steal.
     spawn_count: Cell<usize>,
 
     /// A weak random number generator.
@@ -326,13 +332,16 @@ impl WorkerThread {
     /// meaning of the spawn counter and use of this function.
     #[inline]
     pub unsafe fn pop_spawned_jobs(&self, start_count: usize) {
+        debug_assert!(self.spawn_count.get() >= start_count);
         while self.spawn_count.get() > start_count {
             if let Some(job_ref) = self.pop() {
                 job_ref.execute(JobMode::Execute);
             } else {
+                self.spawn_count.set(start_count);
                 break;
             }
         }
+        debug_assert!(self.spawn_count.get() == start_count);
     }
 
     #[inline]
@@ -347,11 +356,10 @@ impl WorkerThread {
     pub unsafe fn pop(&self) -> Option<JobRef> {
         let spawn_count = self.spawn_count.get();
         if spawn_count > 0 {
+            self.spawn_count.set(spawn_count - 1);
             if let Some(result) = self.worker.pop() {
-                self.spawn_count.set(spawn_count - 1);
                 Some(result)
             } else {
-                self.spawn_count.set(0);
                 None
             }
         } else {
@@ -362,6 +370,35 @@ impl WorkerThread {
     /// Keep stealing jobs until the latch is set.
     #[cold]
     pub unsafe fn steal_until<L: Latch>(&mut self, latch: &L) {
+        // XXX There is a kind of fundamental challenge with injecting
+        // `spawn_async` here. At least, if we want `join` to keep
+        // working the way it does. Currently the logic of `join` is
+        // based on the assumption that nobody ever has a reason to
+        // block except if something is stolen, essentially. (This is
+        // (interestingly) also true with futures.) This allows us to
+        // assume that nobody ever needs to `pop()` more than they (or
+        // their callees) pushed, which in turn means everyone can
+        // maintain the logical stack depth. This allows `join()` to
+        // call `pop()` and know that if it gets back `Some(_)`, it is
+        // its RHS.
+        //
+        // But `spawn_async()` kind of messes with that logic -- or at
+        // least blocking does. Blocking on a `spawn_async()`
+        // basically means we may wind up blocking not because someone
+        // stole from us but **just because**. Therefore, we may
+        // consider stealing from our own deque. This causes
+        // problems with the 'logical stack depth' concept.
+        //
+        // Consider:
+        //
+        // - `join` comes in with stack depth 0
+        // - `join` pushes RHS to stack depth 1
+        // - LHS calls `wait`; while waiting:
+        //     - pop RHS, dropping stack depth to 0
+        //     - steal another task, execute it; this task pushes 1 task `X`
+        //     - up, signal is set, break
+        // - `join` reads stack depth as 1, pops task `X`, assumes it is equal to RHS
+
         // the code below should swallow all panics and hence never
         // unwind; but if something does wrong, we want to abort,
         // because otherwise other code in rayon may assume that the
@@ -370,12 +407,13 @@ impl WorkerThread {
         let guard = unwind::finally((), |_| process::exit(2222));
 
         // NB: In the case of `join` and `scope`, we actually know
-        // that, on entry, the thread-local deque must be empty. But
-        // in the case of `spawn_async`, we do not know
-        // that. Therefore, we want to prefer to pop things from the
-        // thread-local deque before we go off and steal work.
-        // Moreover, once we have stolen something, executing that may
-        // well populate our thread-local deque again.
+        // that, on entry, the thread-local deque must be empty
+        // (though the spawn count may not be zero). But in the case
+        // of `spawn_async`, we do not know that. Therefore, we want
+        // to prefer to pop things from the thread-local deque before
+        // we go off and steal work.  Moreover, once we have stolen
+        // something, executing that may well populate our
+        // thread-local deque again.
         while !latch.probe() {
             if !self.pop_or_steal_and_execute() {
                 thread::yield_now();
@@ -399,7 +437,8 @@ impl WorkerThread {
     /// Steal a single job and return it.
     unsafe fn pop_or_steal(&mut self) -> Option<JobRef> {
         // first check out local deque for work
-        if let Some(job_ref) = self.pop() {
+        if let Some(job_ref) = self.worker.pop() { // (*)
+            // (*) NB -- DO NOT adjust spawn count
             return Some(job_ref);
         }
 

@@ -30,7 +30,7 @@ pub enum JobMode {
 /// Internally, we store the job's data in a `*const ()` pointer.  The
 /// true type is something like `*const StackJob<...>`, but we hide
 /// it. We also carry the "execute fn" from the `Job` trait.
-#[derive(Copy, Clone)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub struct JobRef {
     pointer: *const (),
     execute_fn: unsafe fn(*const (), mode: JobMode),
