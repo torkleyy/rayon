@@ -12,7 +12,6 @@ use std::process;
 use std::thread;
 use std::collections::VecDeque;
 use std::mem;
-use std::ptr;
 use unwind;
 use util::leak;
 use num_cpus;
@@ -240,108 +239,7 @@ pub struct WorkerThread {
     /// A weak random number generator.
     rng: UnsafeCell<rand::XorShiftRng>,
 
-    /// The head of a linked list called the "shadow stack" which
-    /// tracks how many tasks have been pushed/popped to our local
-    /// deque. The purpose of this counter is so that `join()` can
-    /// call `worker.pop()` for its RHS and know with confidence that
-    /// the thing it gets back is either `None` (if RHS was stolen) or
-    /// the RHS task. This lets join avoid using a latch/virtual-call
-    /// in the case where `Some` is returned.
-    ///
-    /// The idea here is roughly like this. For every call to `join`,
-    /// we push a new "frame" onto the shadow stack by allocating a
-    /// struct on the stack and setting `shadow_stack_head` to point
-    /// at it. These frames form a linked list through the `parent`
-    /// pointer. This list winds back up the stack and terminates in a
-    /// sentinel frame that is pushed when the worker starts. This
-    /// sentinel frame will never be popped. (More about it later.)
-    ///
-    /// Each frame in this stack has a counter (`pushed`) for how many
-    /// `push()` calls have occurred while this frame was at the head.
-    /// When you call `push()`, we will increment the counter for the
-    /// head frame. (Note that all of this data is thread-local, so
-    /// for the counter a simple `Cell` suffices.)
-    ///
-    /// We (generally) maintain the invariant that (a) the head frame
-    /// on the stack is never null and (b) that its `pushed` counter
-    /// is always non-zero. So when we pop, we decrement the `pushed`
-    /// counter and, if it reaches zero, we pop the head
-    /// frame. Because the `pushed` counter of the head frame is
-    /// always non-zero, we don't need to worry about overflow.
-    ///
-    /// As we said earlier, to ensure that the head frame is never
-    /// null, there is a sentinel frame that is pushed when the worker
-    /// starts. It has an initial pushed counter of 1. So this means
-    /// that, so long as we don't call `pop()` when the shadow stack
-    /// is empty, the shadow stack frame is never going to be popped.
-    ///
-    /// To ensure that invariant, we are careful to call `pop()` only
-    /// when we know shadow stack frame is not empty. This is not
-    /// actually hard, since we don't call `pop()` in many places, and
-    /// most of them can just test before hand if shadow stack is
-    /// empty (it's a cheap operation to check). Moreover, if any of
-    /// them call `pop()` and observe a `None` response, they can also
-    /// eagerly clear the shadow stack by popping all its frames (see
-    /// the section on "popping frames" below).
-    ///
-    /// # How join works
-    ///
-    /// So let's walk through how join works. If begins by pushing a
-    /// frame onto the shadow stack, let's call that frame F.  F
-    /// initially has a pushed count of 0. Then it immediately pushes
-    /// the RHS task, bumping that count to 1.
-    ///
-    /// Now join can execute the LHS. If there are only join
-    /// operations in the LHS, then pushes/pops will always be
-    /// balanced, and so when the LHS returns, we know that the frame
-    /// F will still have a `pushed` count of 1.
-    ///
-    /// But sometimes there might be unbalanced pushes. This can
-    /// happen with calls to `Scope::spawn()` or `spawn_async()`.  In
-    /// either of these cases, `join()` will first call a routine
-    /// called `pop_all_but_one()`. This basically pops frames until
-    /// the `pushed` count reaches 1. At that point, we can call
-    /// `pop()` to pop off the RHS. Of course, at any point here we
-    /// might find that things have been stolen, in which case we
-    /// branch off to the theft logic.
-    ///
-    /// There is one other subtlety though -- there might also have
-    /// been **unbalanced pops**. In other words, the LHS task -- or
-    /// something started by the LHS -- might itself have popped the
-    /// RHS. This can happen thanks to the `wait()` method on a
-    /// `spawn_async()` result or with futures integration. Either of
-    /// these will basically pop-and-steal until something is ready.
-    /// (Note that both `join` and `scope` never pop things that they
-    /// did not push, since they are only blocked until things they
-    /// pushed are finished; so, if they block at all, it's because
-    /// the local deque is empty thanks to thieves.)
-    ///
-    /// If there are unbalanced pops, then what will happen is that
-    /// the shadow stack frame F will have been popped. This can be
-    /// seen simply by comparing the head pointer to see if it is
-    /// still F. Naturally, the `pop_all_but_one()` routine does this,
-    /// and hence it *also* aborts if the frame F is popped (in which
-    /// case the RHS has been stolen, but by the current thread).
-    shadow_stack_head: Cell<*const ShadowStackFrame>,
-
-    /// a pointer to the root shadow stack head
-    sentinel_frame: *const ShadowStackFrame,
-
     registry: Arc<Registry>,
-}
-
-pub struct ShadowStackFrame {
-    pushed: Cell<usize>,
-    parent: *const ShadowStackFrame,
-}
-
-impl ShadowStackFrame {
-    pub fn new(parent: *const ShadowStackFrame) -> Self {
-        ShadowStackFrame {
-            pushed: Cell::new(0),
-            parent: parent
-        }
-    }
 }
 
 // This is a bit sketchy, but basically: the WorkerThread is
@@ -385,9 +283,6 @@ impl WorkerThread {
 
     #[inline]
     pub unsafe fn push(&self, job: JobRef) {
-        debug_assert!(!self.shadow_stack_head.get().is_null());
-        let shadow_stack_head = &*self.shadow_stack_head.get();
-        shadow_stack_head.pushed.set(shadow_stack_head.pushed.get() + 1);
         self.worker.push(job);
     }
 
@@ -395,84 +290,7 @@ impl WorkerThread {
     /// stolen.
     #[inline]
     pub unsafe fn pop(&self) -> Option<JobRef> {
-        debug_assert!(!self.is_shadow_stack_empty());
-        let shadow_stack_head = &*self.shadow_stack_head.get();
-        let pushed = shadow_stack_head.pushed.get();
-        debug_assert!(pushed > 0);
-        if pushed > 1 {
-            shadow_stack_head.pushed.set(pushed - 1);
-        } else {
-            shadow_stack_head.pushed.set(0);
-            let parent = shadow_stack_head.parent;
-            debug_assert!(!parent.is_null()); // we never pop the sentinel
-            self.shadow_stack_head.set(parent);
-        }
-
         self.worker.pop()
-    }
-
-    pub unsafe fn shadow_stack_head(&self) -> *const ShadowStackFrame {
-        debug_assert!(!self.shadow_stack_head.get().is_null());
-        self.shadow_stack_head.get()
-    }
-
-    pub unsafe fn is_shadow_stack_head(&self, shadow_frame: *const ShadowStackFrame) -> bool {
-        self.shadow_stack_head.get() == shadow_frame
-    }
-
-    pub unsafe fn is_shadow_stack_empty(&self) -> bool {
-        debug_assert!(!self.shadow_stack_head.get().is_null());
-
-        let head = &*self.shadow_stack_head.get();
-        debug_assert!(head.pushed.get() >= 1);
-
-        // the shadow stack is considered empty if the only thing on
-        // it is the sentinel, and its `pushed` count is 1
-        if head.pushed.get() > 1 {
-            return false; // pushed count too high
-        }
-        if !head.parent.is_null() {
-            return false; // not the sentinel
-        }
-
-        // if the shadow stack is empty, should not be able to pop
-        debug_assert!(self.worker.pop().is_none());
-
-        true
-    }
-
-    unsafe fn clear_shadow_stack(&self) {
-        self.shadow_stack_head.set(self.sentinel_frame);
-        (*self.sentinel_frame).pushed.set(1);
-    }
-
-    pub unsafe fn push_shadow_frame(&self, shadow_frame: *const ShadowStackFrame) {
-        debug_assert!(!shadow_frame.is_null());
-        debug_assert!((*shadow_frame).parent == self.shadow_stack_head.get());
-        self.shadow_stack_head.set(shadow_frame);
-    }
-
-    #[inline]
-    pub unsafe fn pop_and_execute_all_but_one(&self, head: &ShadowStackFrame) -> bool {
-        loop {
-            if !self.is_shadow_stack_head(head) {
-                // this shadow stack frame got popped somewhere along the way, abort
-                return false;
-            }
-            if head.pushed.get() == 1 {
-                // shadow stack is down to its last job, all set!
-                return true;
-            }
-
-            if let Some(job) = self.pop() {
-                // execute next job, then repeat
-                job.execute(JobMode::Execute);
-            } else {
-                // job was stolen, abort; moreover, pop all shadow stacks
-                self.clear_shadow_stack();
-                return false;
-            }
-        }
     }
 
     /// Wait until the latch is set. Try to keep busy by popping and
@@ -520,13 +338,7 @@ impl WorkerThread {
     /// code elsewhere never pops indiscriminantly, but always with
     /// some notion of the current stack depth.
     unsafe fn pop_or_steal(&self) -> Option<JobRef> {
-        if !self.is_shadow_stack_empty() {
-            if let Some(job) = self.pop() {
-                return Some(job);
-            }
-            self.clear_shadow_stack();
-        }
-        self.steal()
+        self.pop().or_else(|| self.steal())
     }
 
     /// Try to steal a single job and return it.
@@ -577,17 +389,12 @@ unsafe fn main_loop(worker: Worker<JobRef>, registry: Arc<Registry>, index: usiz
     assert!(stealers.len() < ::std::u32::MAX as usize,
             "We assume this is not going to happen!");
 
-    let sentinel_frame = ShadowStackFrame::new(ptr::null());
-    sentinel_frame.pushed.set(1);
-
     let mut worker_thread = WorkerThread {
         worker: worker,
         stealers: stealers,
         index: index,
         rng: UnsafeCell::new(rand::weak_rng()),
         registry: registry.clone(),
-        shadow_stack_head: Cell::new(&sentinel_frame),
-        sentinel_frame: &sentinel_frame,
     };
     WorkerThread::set_current(&mut worker_thread);
 
