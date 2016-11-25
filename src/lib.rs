@@ -12,6 +12,7 @@ extern crate rand;
 mod log;
 
 mod api;
+#[cfg(feature = "unstable")]
 mod future;
 mod latch;
 mod join;

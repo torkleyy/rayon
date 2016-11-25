@@ -23,7 +23,7 @@ fn join_recursively(b: &mut Bencher) {
     }
 
     b.iter(|| {
-        join_recursively(256);
+        join_recursively(16);
     });
 }
 
