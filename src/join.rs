@@ -1,7 +1,7 @@
 use latch::{Latch, LockLatch, SpinLatch};
 #[allow(unused_imports)]
 use log::Event::*;
-use job::{JobMode, StackJob};
+use job::{JobMode, JobRef, StackJob};
 use thread_pool::{self, WorkerThread};
 use std::mem;
 use unwind;
@@ -75,32 +75,54 @@ pub fn join<A, B, RA, RB>(oper_a: A, oper_b: B) -> (RA, RB)
         if !job_b.latch.probe() {
             // try to pop `b`; there may have been other jobs pushed on our deque
             // by job a, so we have to get through those first.
-            //
-            // NB: it's not obvious that executing those jobs is the
-            // best strategy. These jobs must have been either
-            // `spawn_async()` calls or else spawned into an enclosing
-            // scope, and one could imagine it's better to process
-            // them then. But the deque doesn't easily permit that,
-            // and of course it *may* be better to stick with the DFS
-            // strategy.
-            while let Some(job) = worker_thread.pop() {
+            if let Some(job) = worker_thread.pop() {
                 if job == job_b_ref {
                     log!(PoppedJob { worker: worker_thread.index() });
                     let result_b = job_b.run_inline(); // not stolen, let's do it!
                     return (result_a, result_b);
-                } else {
-                    job.execute(JobMode::Execute);
                 }
-            }
 
-            // b was stolen, wait for the thief to be finish (and be helpful in the meantime)
-            log!(LostJob { worker: worker_thread.index() });
-            worker_thread.wait_until(&job_b.latch);
+                join_cold(&job_b.latch, Some(job));
+            } else {
+                join_cold(&job_b.latch, None);
+            }
         }
 
-        let result_b = job_b.into_result();
-        (result_a, result_b)
+        return (result_a, job_b.into_result());
     }
+}
+
+/// Recover from a failure to pop "job B" from a join.
+/// This could be because it was stolen by another thread,
+/// popped during execution of the LHS, or because the LHS
+/// pushed other jobs.
+///
+/// Recovery works by popping jobs from the local deque and/or
+/// stealing from other deques until the latch is set. NB: in the case
+/// where there are still jobs on the local deque, it's not obvious
+/// that executing those jobs is the best strategy. These jobs must
+/// have been either `spawn_async()` calls or else spawned into an
+/// enclosing scope, and one could imagine it's better to process them
+/// then. But the deque doesn't easily permit that, and of course it
+/// *may* be better to stick with the DFS strategy.
+///
+/// The argument `popping` is a job that was popped but not yet
+/// executed. If `Some(_)`, it is always executed first.
+///
+/// Unsafe: must be called on a worker thread.
+#[cold]
+unsafe fn join_cold(job_b_latch: &SpinLatch,
+                    popped: Option<JobRef>) {
+    let worker_thread = WorkerThread::current();
+    debug_assert!(!worker_thread.is_null());
+    let worker_thread = &*worker_thread;
+
+    if let Some(job) = popped {
+        job.execute(JobMode::Execute);
+    }
+
+    log!(LostJob { worker: worker_thread.index() });
+    worker_thread.wait_until(job_b_latch);
 }
 
 #[cold] // cold path
