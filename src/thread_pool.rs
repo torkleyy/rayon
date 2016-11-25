@@ -424,7 +424,9 @@ unsafe fn main_loop(worker: Worker<JobRef>, registry: Arc<Registry>, index: usiz
             // them very low priority, which seems good. Finish what
             // we are doing before taking on new things.
             log!(StoleWork { worker: index });
-            registry.start_working(index);
+            if !was_active {
+                registry.start_working(index);
+            }
             job.execute(JobMode::Execute);
             was_active = true;
         }
