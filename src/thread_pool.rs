@@ -240,66 +240,88 @@ pub struct WorkerThread {
     /// A weak random number generator.
     rng: UnsafeCell<rand::XorShiftRng>,
 
-    /// A counter tracking the "logical stack depth" for our local
-    /// deque -- basically, what it *would* be, if other people
-    /// weren't stealing from the top. Every time we push onto the
-    /// deque, we increment this counter, and everytime we pop from
-    /// the deque, we decrement it.
+    /// The head of a linked list called the "shadow stack" which
+    /// tracks how many tasks have been pushed/popped to our local
+    /// deque. The purpose of this counter is so that `join()` can
+    /// call `worker.pop()` for its RHS and know with confidence that
+    /// the thing it gets back is either `None` (if RHS was stolen) or
+    /// the RHS task. This lets join avoid using a latch/virtual-call
+    /// in the case where `Some` is returned.
     ///
-    /// Basically the whole purpose of this counter is so that
-    /// `join()` can call `worker.pop()` for its RHS and know with
-    /// confidence that the thing it gets back is either `None` (if
-    /// RHS was stolen) or the RHS task. This lets join avoid using a
-    /// latch/virtual-call in the case where `Some` is returned.
+    /// The idea here is roughly like this. For every call to `join`,
+    /// we push a new "frame" onto the shadow stack by allocating a
+    /// struct on the stack and setting `shadow_stack_head` to point
+    /// at it. These frames form a linked list through the `parent`
+    /// pointer. This list winds back up the stack and terminates in a
+    /// sentinel frame that is pushed when the worker starts. This
+    /// sentinel frame will never be popped. (More about it later.)
     ///
-    /// The actual logic here is a bit subtle. It relies on the key
-    /// assumption that nobody has a reason to block unless someone
-    /// else has stolen a task from their local deque. Put another
-    /// way, if I push N tasks, then I would never try to pop more
-    /// than N tasks. This is because, if I pop all N of my tasks,
-    /// then my work is done and I am ready to return. If fail to pop
-    /// them all, then this is because another thread stole them, in
-    /// which case I have no reason to pop, since the deque is empty.
+    /// Each frame in this stack has a counter (`pushed`) for how many
+    /// `push()` calls have occurred while this frame was at the head.
+    /// When you call `push()`, we will increment the counter for the
+    /// head frame. (Note that all of this data is thread-local, so
+    /// for the counter a simple `Cell` suffices.)
     ///
-    /// Therefore, we can keep a *logical stack counter* at all
-    /// points, and we know that whenever we execute a job, it can
-    /// only increase this counter or leave it the same. A job J
-    /// should never pop things that J (or one of its callees) did not
-    /// itself push.
+    /// We (generally) maintain the invariant that (a) the head frame
+    /// on the stack is never null and (b) that its `pushed` counter
+    /// is always non-zero. So when we pop, we decrement the `pushed`
+    /// counter and, if it reaches zero, we pop the head
+    /// frame. Because the `pushed` counter of the head frame is
+    /// always non-zero, we don't need to worry about overflow.
     ///
-    /// This allows `join()` to record the stack depth as D; push the
-    /// RHS (increasing stack depth to D+1) and execute the LHS. After
-    /// executing the LHS, the new logical stack is D' > D. So if we
-    /// are able to pop D' - D things, the last thing popped must be
-    /// the RHS (note, though, that it may have been stolen, so we may
-    /// not able to pop all those things).
+    /// As we said earlier, to ensure that the head frame is never
+    /// null, there is a sentinel frame that is pushed when the worker
+    /// starts. It has an initial pushed counter of 1. So this means
+    /// that, so long as we don't call `pop()` when the shadow stack
+    /// is empty, the shadow stack frame is never going to be popped.
     ///
-    /// One operation that this invariant disallows (or least
-    /// makes...inconvenient) is a blocking join of random tasks in
-    /// the Rayon queue (i.e., ones that your current task did not
-    /// transitively spawn). If we permitted you to join some random
-    /// task, it may not have been spawned by your local deque. As a
-    /// result, while you are waiting, you would be inclined to pop
-    /// items from your local deque, and maybe steal from others.  But
-    /// in that case you might easily pop things that you did not
-    /// push, violating the invariant. So we could permit this
-    /// operation, but rather than *popping* from the deque you would
-    /// steal from it.  The whole thing is just inefficient, though,
-    /// so we don't offer that API, and instead encourage the use of
-    /// futures.
+    /// To ensure that invariant, we are careful to call `pop()` only
+    /// when we know shadow stack frame is not empty. This is not
+    /// actually hard, since we don't call `pop()` in many places, and
+    /// most of them can just test before hand if shadow stack is
+    /// empty (it's a cheap operation to check). Moreover, if any of
+    /// them call `pop()` and observe a `None` response, they can also
+    /// eagerly clear the shadow stack by popping all its frames (see
+    /// the section on "popping frames" below).
     ///
-    /// A concrete example of how things could go wrong:
+    /// # How join works
     ///
-    /// - `join` comes in with stack depth 0
-    /// - `join` pushes RHS to stack depth 1
-    /// - LHS calls `wait` on some random job; while waiting:
-    ///     - we pop RHS, dropping stack depth to 0
-    ///     - steal another task, execute it; this task pushes 1 task `X`
-    ///     - up, signal is set, break
-    /// - `join` reads stack depth as 1, pops task `X`, assumes it is equal to RHS
+    /// So let's walk through how join works. If begins by pushing a
+    /// frame onto the shadow stack, let's call that frame F.  F
+    /// initially has a pushed count of 0. Then it immediately pushes
+    /// the RHS task, bumping that count to 1.
     ///
-    /// never null; there is a sentinel frame at the top, and each
-    /// join frame pushes one entry onto the top of this stack
+    /// Now join can execute the LHS. If there are only join
+    /// operations in the LHS, then pushes/pops will always be
+    /// balanced, and so when the LHS returns, we know that the frame
+    /// F will still have a `pushed` count of 1.
+    ///
+    /// But sometimes there might be unbalanced pushes. This can
+    /// happen with calls to `Scope::spawn()` or `spawn_async()`.  In
+    /// either of these cases, `join()` will first call a routine
+    /// called `pop_all_but_one()`. This basically pops frames until
+    /// the `pushed` count reaches 1. At that point, we can call
+    /// `pop()` to pop off the RHS. Of course, at any point here we
+    /// might find that things have been stolen, in which case we
+    /// branch off to the theft logic.
+    ///
+    /// There is one other subtlety though -- there might also have
+    /// been **unbalanced pops**. In other words, the LHS task -- or
+    /// something started by the LHS -- might itself have popped the
+    /// RHS. This can happen thanks to the `wait()` method on a
+    /// `spawn_async()` result or with futures integration. Either of
+    /// these will basically pop-and-steal until something is ready.
+    /// (Note that both `join` and `scope` never pop things that they
+    /// did not push, since they are only blocked until things they
+    /// pushed are finished; so, if they block at all, it's because
+    /// the local deque is empty thanks to thieves.)
+    ///
+    /// If there are unbalanced pops, then what will happen is that
+    /// the shadow stack frame F will have been popped. This can be
+    /// seen simply by comparing the head pointer to see if it is
+    /// still F. Naturally, the `pop_all_but_one()` routine does this,
+    /// and hence it *also* aborts if the frame F is popped (in which
+    /// case the RHS has been stolen, but by the current thread).
     shadow_stack_head: Cell<*const ShadowStackFrame>,
 
     /// a pointer to the root shadow stack head
