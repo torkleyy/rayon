@@ -1,8 +1,8 @@
-use latch::{LockLatch, SpinLatch};
+use latch::{Latch, LockLatch, SpinLatch};
 #[allow(unused_imports)]
 use log::Event::*;
 use job::StackJob;
-use thread_pool::{self, WorkerThread};
+use thread_pool::{self, ShadowStackFrame, WorkerThread};
 use std::mem;
 use unwind;
 
@@ -20,31 +20,63 @@ pub fn join<A, B, RA, RB>(oper_a: A, oper_b: B) -> (RA, RB)
             return join_inject(oper_a, oper_b);
         }
 
-        #[cfg(debug_assertions)]
-        let start_spawn_count = (*worker_thread).current_spawn_count();
+        let worker_thread = &*worker_thread;
 
-        log!(Join { worker: (*worker_thread).index() });
+        log!(Join { worker: worker_thread.index() });
+
+        let shadow_frame = ShadowStackFrame::new(worker_thread.shadow_stack_head());
+        worker_thread.push_shadow_frame(&shadow_frame);
 
         // create virtual wrapper for task b; this all has to be
         // done here so that the stack frame can keep it all live
         // long enough
         let job_b = StackJob::new(oper_b, SpinLatch::new());
-        (*worker_thread).push(job_b.as_job_ref());
-
-        // record stack depth now that B is pushed (but before A executes)
-        let spawn_count = (*worker_thread).current_spawn_count();
+        worker_thread.push(job_b.as_job_ref());
 
         // execute task a; hopefully b gets stolen
         let result_a;
         {
             let guard = unwind::finally(&job_b.latch, |job_b_latch| {
-                // If another thread stole our job when we panic, we must halt unwinding
-                // until that thread is finished using it.
-                if (*WorkerThread::current()).pop().is_none() {
-                    job_b_latch.spin();
+                // If job A panics, we have to make sure that job B is
+                // finished executing before we actually unwind,
+                // because it may be using bits of data on the stack
+                // frame. The best way to do this is to pop it before
+                // it gets stolen. Failing that, we will just have to
+                // spin on the latch. We can't really risk executing
+                // work, because if that work should panic, that would
+                // be a double panic, which would kill the process.
+                if worker_thread.is_shadow_stack_head(&shadow_frame) {
+                    let mut failed_to_pop = false;
+                    while worker_thread.is_shadow_stack_head(&shadow_frame) {
+                        if worker_thread.pop().is_none() {
+                            failed_to_pop = true;
+                            break;
+                        }
+                    }
+
+                    // If we observed this chain of events:
+                    //
+                    // - our shadow stack was head
+                    // - we had a successful pop
+                    // - our stack stack is *not* head
+                    //
+                    // then we know that we have popped job b, so we
+                    // can just return without spinning.
+                    if !failed_to_pop {
+                        // job b never executed, so its latch should not have been set
+                        debug_assert!(!job_b_latch.probe());
+                        return;
+                    }
                 }
+
+                // otherwise, job b was stolen, we have to spin
+                job_b_latch.spin();
             });
+
+            // execute job a
             result_a = oper_a();
+
+            // if successful, no need for panic recovery
             mem::forget(guard);
         }
 
@@ -61,26 +93,25 @@ pub fn join<A, B, RA, RB>(oper_a: A, oper_b: B) -> (RA, RB)
         // better belong with their scope, in which case it seems
         // better to try to execute RHS before those jobs. We could
         // implement this in various ways.
-        (*worker_thread).pop_spawned_jobs(spawn_count);
-
-        // if b was not stolen, do it ourselves, else wait for the thief to finish
-        let result_b;
-        if let Some(j) = (*worker_thread).pop() {
-            log!(PoppedJob { worker: (*worker_thread).index() });
-            debug_assert_eq!(job_b.as_job_ref(), j);
-            result_b = job_b.run_inline(); // not stolen, let's do it!
-        } else {
-            log!(LostJob { worker: (*worker_thread).index() });
-            (*worker_thread).steal_until(&job_b.latch); // stolen, wait for them to finish
-            result_b = job_b.into_result();
+        if worker_thread.pop_and_execute_all_but_one(&shadow_frame) {
+            // if `pop_all_but_one()` returns true, then the next
+            // thing popped from our local deque will be `job_b`; if
+            // it returns false, then `job_b` was stolen (possibly
+            // even by this thread)
+            debug_assert!(worker_thread.is_shadow_stack_head(&shadow_frame));
+            if let Some(j) = worker_thread.pop() {
+                debug_assert!(!worker_thread.is_shadow_stack_head(&shadow_frame));
+                debug_assert_eq!(job_b.as_job_ref(), j);
+                log!(PoppedJob { worker: worker_thread.index() });
+                let result_b = job_b.run_inline(); // not stolen, let's do it!
+                return (result_a, result_b);
+            }
         }
 
-        // job b, or stolen jobs, may have pushed things; but none of
-        // them should have (logically, anyway) popped things from
-        // logical depth
-        debug_assert!((*worker_thread).current_spawn_count() >= start_spawn_count);
-
-        // now result_b should be initialized
+        // b was stolen, wait for the thief to be finish (and be helpful in the meantime)
+        log!(LostJob { worker: worker_thread.index() });
+        worker_thread.wait_until(&job_b.latch);
+        let result_b = job_b.into_result();
         (result_a, result_b)
     }
 }

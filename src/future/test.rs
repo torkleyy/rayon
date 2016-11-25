@@ -1,7 +1,7 @@
 use futures::future;
 
 use futures::future::{Future, BoxFuture};
-use super::spawn_future;
+use super::spawn_future_async;
 
 fn done<T: Send + 'static>(t: T) -> BoxFuture<T, ()> {
     future::ok(t).boxed()
@@ -14,8 +14,8 @@ fn argh<T: Send + 'static>() -> BoxFuture<T, ()> {
 
 #[test]
 fn join() {
-    let a = spawn_future(done(1));
-    let b = spawn_future(done(2));
+    let a = spawn_future_async(done(1));
+    let b = spawn_future_async(done(2));
     let res = a.join(b).map(|(a, b)| a + b).wait();
 
     assert_eq!(res.unwrap(), 3);
@@ -23,8 +23,8 @@ fn join() {
 
 #[test]
 fn select() {
-    let a = spawn_future(done(1));
-    let b = spawn_future(done(2));
+    let a = spawn_future_async(done(1));
+    let b = spawn_future_async(done(2));
     let (item1, next) = a.select(b).wait().ok().unwrap();
     let item2 = next.wait().unwrap();
 
@@ -35,7 +35,7 @@ fn select() {
 #[test]
 #[should_panic]
 fn panic_prop() {
-    let a = spawn_future(argh::<()>());
+    let a = spawn_future_async(argh::<()>());
     let _ = a.wait(); // should panic, not return error
 }
 

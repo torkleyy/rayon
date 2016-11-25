@@ -32,9 +32,11 @@ pub use api::Configuration;
 pub use api::InitError;
 pub use api::dump_stats;
 pub use api::initialize;
+pub use api::ThreadPool;
+#[cfg(feature = "unstable")]
+pub use future::{RayonFuture, spawn_future_async};
 pub use join::join;
 #[cfg(feature = "unstable")]
 pub use spawn_async::spawn_async;
-pub use api::ThreadPool;
 #[cfg(feature = "unstable")]
 pub use scope::{scope, Scope};

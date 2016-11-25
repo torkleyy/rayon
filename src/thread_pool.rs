@@ -12,6 +12,7 @@ use std::process;
 use std::thread;
 use std::collections::VecDeque;
 use std::mem;
+use std::ptr;
 use unwind;
 use util::leak;
 use num_cpus;
@@ -236,6 +237,9 @@ pub struct WorkerThread {
     stealers: Vec<Stealer<JobRef>>,
     index: usize,
 
+    /// A weak random number generator.
+    rng: UnsafeCell<rand::XorShiftRng>,
+
     /// A counter tracking the "logical stack depth" for our local
     /// deque -- basically, what it *would* be, if other people
     /// weren't stealing from the top. Every time we push onto the
@@ -293,12 +297,29 @@ pub struct WorkerThread {
     ///     - steal another task, execute it; this task pushes 1 task `X`
     ///     - up, signal is set, break
     /// - `join` reads stack depth as 1, pops task `X`, assumes it is equal to RHS
-    spawn_count: Cell<usize>,
+    ///
+    /// never null; there is a sentinel frame at the top, and each
+    /// join frame pushes one entry onto the top of this stack
+    shadow_stack_head: Cell<*const ShadowStackFrame>,
 
-    /// A weak random number generator.
-    rng: UnsafeCell<rand::XorShiftRng>,
+    /// a pointer to the root shadow stack head
+    sentinel_frame: *const ShadowStackFrame,
 
     registry: Arc<Registry>,
+}
+
+pub struct ShadowStackFrame {
+    pushed: Cell<usize>,
+    parent: *const ShadowStackFrame,
+}
+
+impl ShadowStackFrame {
+    pub fn new(parent: *const ShadowStackFrame) -> Self {
+        ShadowStackFrame {
+            pushed: Cell::new(0),
+            parent: parent
+        }
+    }
 }
 
 // This is a bit sketchy, but basically: the WorkerThread is
@@ -322,10 +343,10 @@ impl WorkerThread {
 
     /// Sets `self` as the worker thread index for the current thread.
     /// This is done during worker thread startup.
-    unsafe fn set_current(&mut self) {
+    unsafe fn set_current(thread: *mut WorkerThread) {
         WORKER_THREAD_STATE.with(|t| {
             assert!(t.get().is_null());
-            t.set(self);
+            t.set(thread);
         });
     }
 
@@ -340,38 +361,11 @@ impl WorkerThread {
         self.index
     }
 
-    /// Read current value of the spawn counter.
-    ///
-    /// See the `spawn_count` field for an extensive comment on the
-    /// meaning of the spawn counter.
-    #[inline]
-    pub fn current_spawn_count(&self) -> usize {
-        self.spawn_count.get()
-    }
-
-    /// Pops spawned (async) jobs until our spawn count reaches
-    /// `start_count` or the deque is empty. This routine is used to
-    /// ensure that the local deque is "balanced".
-    ///
-    /// See the `spawn_count` field for an extensive comment on the
-    /// meaning of the spawn counter and use of this function.
-    #[inline]
-    pub unsafe fn pop_spawned_jobs(&self, start_count: usize) {
-        debug_assert!(self.spawn_count.get() >= start_count);
-        while self.spawn_count.get() > start_count {
-            if let Some(job_ref) = self.pop() {
-                job_ref.execute(JobMode::Execute);
-            } else {
-                self.spawn_count.set(start_count);
-                break;
-            }
-        }
-        debug_assert!(self.spawn_count.get() == start_count);
-    }
-
     #[inline]
     pub unsafe fn push(&self, job: JobRef) {
-        self.spawn_count.set(self.spawn_count.get() + 1);
+        debug_assert!(!self.shadow_stack_head.get().is_null());
+        let shadow_stack_head = &*self.shadow_stack_head.get();
+        shadow_stack_head.pushed.set(shadow_stack_head.pushed.get() + 1);
         self.worker.push(job);
     }
 
@@ -379,30 +373,97 @@ impl WorkerThread {
     /// stolen.
     #[inline]
     pub unsafe fn pop(&self) -> Option<JobRef> {
-        let spawn_count = self.spawn_count.get();
-        if spawn_count > 0 {
-            self.spawn_count.set(spawn_count - 1);
-            if let Some(result) = self.worker.pop() {
-                Some(result)
-            } else {
-                None
-            }
+        debug_assert!(!self.is_shadow_stack_empty());
+        let shadow_stack_head = &*self.shadow_stack_head.get();
+        let pushed = shadow_stack_head.pushed.get();
+        debug_assert!(pushed > 0);
+        if pushed > 1 {
+            shadow_stack_head.pushed.set(pushed - 1);
         } else {
-            None
+            shadow_stack_head.pushed.set(0);
+            let parent = shadow_stack_head.parent;
+            debug_assert!(!parent.is_null()); // we never pop the sentinel
+            self.shadow_stack_head.set(parent);
+        }
+
+        self.worker.pop()
+    }
+
+    pub unsafe fn shadow_stack_head(&self) -> *const ShadowStackFrame {
+        debug_assert!(!self.shadow_stack_head.get().is_null());
+        self.shadow_stack_head.get()
+    }
+
+    pub unsafe fn is_shadow_stack_head(&self, shadow_frame: *const ShadowStackFrame) -> bool {
+        self.shadow_stack_head.get() == shadow_frame
+    }
+
+    pub unsafe fn is_shadow_stack_empty(&self) -> bool {
+        debug_assert!(!self.shadow_stack_head.get().is_null());
+
+        let head = &*self.shadow_stack_head.get();
+        debug_assert!(head.pushed.get() >= 1);
+
+        // the shadow stack is considered empty if the only thing on
+        // it is the sentinel, and its `pushed` count is 1
+        if head.pushed.get() > 1 {
+            return false; // pushed count too high
+        }
+        if !head.parent.is_null() {
+            return false; // not the sentinel
+        }
+
+        // if the shadow stack is empty, should not be able to pop
+        debug_assert!(self.worker.pop().is_none());
+
+        true
+    }
+
+    unsafe fn clear_shadow_stack(&self) {
+        self.shadow_stack_head.set(self.sentinel_frame);
+        (*self.sentinel_frame).pushed.set(1);
+    }
+
+    pub unsafe fn push_shadow_frame(&self, shadow_frame: *const ShadowStackFrame) {
+        debug_assert!(!shadow_frame.is_null());
+        debug_assert!((*shadow_frame).parent == self.shadow_stack_head.get());
+        self.shadow_stack_head.set(shadow_frame);
+    }
+
+    #[inline]
+    pub unsafe fn pop_and_execute_all_but_one(&self, head: &ShadowStackFrame) -> bool {
+        loop {
+            if !self.is_shadow_stack_head(head) {
+                // this shadow stack frame got popped somewhere along the way, abort
+                return false;
+            }
+            if head.pushed.get() == 1 {
+                // shadow stack is down to its last job, all set!
+                return true;
+            }
+
+            if let Some(job) = self.pop() {
+                // execute next job, then repeat
+                job.execute(JobMode::Execute);
+            } else {
+                // job was stolen, abort; moreover, pop all shadow stacks
+                self.clear_shadow_stack();
+                return false;
+            }
         }
     }
 
-    /// Keep stealing jobs until the latch is set.
+    /// Wait until the latch is set. Try to keep busy by popping and
+    /// stealing tasks as necessary.
+    #[inline]
+    pub unsafe fn wait_until<L: Latch>(&self, latch: &L) {
+        if !latch.probe() {
+            self.wait_until_cold(latch);
+        }
+    }
+
     #[cold]
-    pub unsafe fn steal_until<L: Latch>(&self, latch: &L) {
-        // we only ever try to steal if we've exhausted our local work
-        debug_assert!(self.worker.pop().is_none());
-
-        // load initial logical depth of our local deque; this will be
-        // used later to check if stolen jobs pushed work we might
-        // want to do
-        let spawn_count = self.spawn_count.get();
-
+    unsafe fn wait_until_cold<L: Latch>(&self, latch: &L) {
         // the code below should swallow all panics and hence never
         // unwind; but if something does wrong, we want to abort,
         // because otherwise other code in rayon may assume that the
@@ -411,16 +472,8 @@ impl WorkerThread {
         let guard = unwind::finally((), |_| process::exit(2222));
 
         while !latch.probe() {
-            // check if something we stole pushed new local jobs
-            if self.spawn_count.get() > spawn_count {
-                if let Some(job) = self.pop() {
-                    job.execute(JobMode::Execute);
-                    continue;
-                }
-            }
-
             // if not, try to steal some more
-            if !self.steal_and_execute() {
+            if !self.pop_or_steal_and_execute() {
                 thread::yield_now();
             }
         }
@@ -430,8 +483,8 @@ impl WorkerThread {
 
     /// Try to steal a single job. If successful, execute it and
     /// return true. Else return false.
-    unsafe fn steal_and_execute(&self) -> bool {
-        if let Some(job) = self.steal() {
+    unsafe fn pop_or_steal_and_execute(&self) -> bool {
+        if let Some(job) = self.pop_or_steal() {
             job.execute(JobMode::Execute);
             true
         } else {
@@ -441,11 +494,17 @@ impl WorkerThread {
 
     /// Try to pop a job locally; if none is found, try to steal a job.
     ///
-    /// This is only used in the main worker loop: code elsewhere
-    /// never pops indiscriminantly, but always with some notion of
-    /// the current stack depth.
+    /// This is only used in the main worker loop or when stealing:
+    /// code elsewhere never pops indiscriminantly, but always with
+    /// some notion of the current stack depth.
     unsafe fn pop_or_steal(&self) -> Option<JobRef> {
-        self.pop().or_else(|| self.steal())
+        if !self.is_shadow_stack_empty() {
+            if let Some(job) = self.pop() {
+                return Some(job);
+            }
+            self.clear_shadow_stack();
+        }
+        self.steal()
     }
 
     /// Try to steal a single job and return it.
@@ -461,7 +520,7 @@ impl WorkerThread {
             return None;
         }
 
-        let start = unsafe {
+        let start = {
             // OK to use this UnsafeCell because (a) this data is
             // confined to current thread, as WorkerThread is not Send
             // nor Sync and (b) rand crate will not call back into
@@ -496,15 +555,19 @@ unsafe fn main_loop(worker: Worker<JobRef>, registry: Arc<Registry>, index: usiz
     assert!(stealers.len() < ::std::u32::MAX as usize,
             "We assume this is not going to happen!");
 
+    let sentinel_frame = ShadowStackFrame::new(ptr::null());
+    sentinel_frame.pushed.set(1);
+
     let mut worker_thread = WorkerThread {
         worker: worker,
         stealers: stealers,
         index: index,
-        spawn_count: Cell::new(0),
         rng: UnsafeCell::new(rand::weak_rng()),
         registry: registry.clone(),
+        shadow_stack_head: Cell::new(&sentinel_frame),
+        sentinel_frame: &sentinel_frame,
     };
-    worker_thread.set_current();
+    WorkerThread::set_current(&mut worker_thread);
 
     // let registry know we are ready to do work
     registry.thread_infos[index].primed.set();

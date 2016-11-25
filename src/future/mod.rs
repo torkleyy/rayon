@@ -15,7 +15,7 @@ struct RayonSender<F, T> {
     tx: Option<Sender<T>>,
 }
 
-pub fn spawn_future<F>(f: F) -> RayonFuture<F::Item, F::Error>
+pub fn spawn_future_async<F>(f: F) -> RayonFuture<F::Item, F::Error>
     where F: Future + Send + 'static,
           F::Item: Send + 'static,
           F::Error: Send + 'static,

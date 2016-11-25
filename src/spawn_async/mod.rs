@@ -169,7 +169,7 @@ impl<F, R> SpawnAsync<F, R>
             unsafe {
                 let owner_thread = WorkerThread::current();
                 if !owner_thread.is_null() {
-                    (*owner_thread).steal_until(job.latch());
+                    (*owner_thread).wait_until(job.latch());
                 } else {
                     job.latch().wait();
                 }
