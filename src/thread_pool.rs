@@ -1,8 +1,9 @@
 use Configuration;
 use deque;
 use deque::{Worker, Stealer, Stolen};
+use epoch::Epoch;
 use job::{JobRef, JobMode, StackJob};
-use latch::{Latch, LockLatch};
+use latch::{Latch, SpinLatch, LockLatch};
 #[allow(unused_imports)]
 use log::Event::*;
 use rand::{self, Rng};
@@ -24,6 +25,7 @@ pub struct Registry {
     thread_infos: Vec<ThreadInfo>,
     state: Mutex<RegistryState>,
     work_available: Condvar,
+    epoch: Epoch,
 }
 
 struct RegistryState {
@@ -96,6 +98,7 @@ impl Registry {
                 .collect(),
             state: Mutex::new(RegistryState::new()),
             work_available: Condvar::new(),
+            epoch: Epoch::new(),
         });
 
         for (index, worker) in workers.into_iter().enumerate() {
@@ -149,7 +152,12 @@ impl Registry {
 
             state.injected_jobs.extend(injected_jobs);
         }
-        self.work_available.notify_all();
+        self.epoch.tickle();
+    }
+
+    fn pop_injected_job(&self) -> Option<JobRef> {
+        let mut state = self.state.lock().unwrap();
+        state.injected_jobs.pop_front()
     }
 
     fn wait_for_work(&self, _worker: usize, was_active: bool) -> Work {
@@ -312,7 +320,7 @@ impl WorkerThread {
         // because otherwise other code in rayon may assume that the
         // latch has been signaled, and hence that permit random
         // memory accesses, which would be *very bad*
-        let guard = unwind::finally((), |_| process::exit(2222));
+        let abort_guard = unwind::AbortIfPanic;
 
         let mut yields = 0;
         while !latch.probe() {
@@ -325,7 +333,7 @@ impl WorkerThread {
             }
         }
 
-        mem::forget(guard); // successful execution, do not abort
+        mem::forget(abort_guard); // successful execution, do not abort
     }
 
     /// Try to steal a single job. If successful, execute it and
@@ -345,7 +353,7 @@ impl WorkerThread {
     /// code elsewhere never pops indiscriminantly, but always with
     /// some notion of the current stack depth.
     unsafe fn pop_or_steal(&self) -> Option<JobRef> {
-        self.pop().or_else(|| self.steal())
+        self.pop().or_else(|| self.steal()).or_else(|| self.registry.pop_injected_job())
     }
 
     /// Try to steal a single job and return it.
@@ -385,6 +393,7 @@ impl WorkerThread {
     /// Invoked when work is pushed on the deque.
     #[inline]
     fn notify_work_pushed(&self) {
+        self.registry.epoch.tickle();
     }
 
     /// Invoked from the `wait_until()` loop when no work has been
@@ -392,25 +401,8 @@ impl WorkerThread {
     /// which nothing has been found.
     #[inline]
     fn yield_for_work(&self, yields: usize) {
-        // Exponential backoff to 100ms.
-        const SLEEP_MS: &'static [u64] = &[
-            0,
-            0,
-            0,
-            10,
-            20,
-            40,
-            80,
-            100,
-            200,
-            400,
-        ];
-        let index = cmp::min(SLEEP_MS.len() - 1, yields);
-        let sleep_ms = SLEEP_MS[index];
-        if sleep_ms == 0 {
-            thread::yield_now();
-        } else {
-            thread::sleep(Duration::from_millis(sleep_ms));
+        if yields > 22 {
+            self.registry.epoch.sleep();
         }
     }
 }
@@ -445,31 +437,8 @@ unsafe fn main_loop(worker: Worker<JobRef>, registry: Arc<Registry>, index: usiz
     // **user code** panics, we should catch that and redirect.
     let abort_guard = unwind::AbortIfPanic;
 
-    let mut was_active = false;
-    loop {
-        match registry.wait_for_work(index, was_active) {
-            Work::Job(injected_job) => {
-                injected_job.execute(JobMode::Execute);
-                was_active = true;
-                continue;
-            }
-            Work::Terminate => break,
-            Work::None => {}
-        }
-
-        was_active = false;
-        while let Some(job) = worker_thread.pop_or_steal() {
-            // How do we want to prioritize injected jobs? this gives
-            // them very low priority, which seems good. Finish what
-            // we are doing before taking on new things.
-            log!(StoleWork { worker: index });
-            if !was_active {
-                registry.start_working(index);
-            }
-            job.execute(JobMode::Execute);
-            was_active = true;
-        }
-    }
+    let dummy_latch = SpinLatch::new();
+    worker_thread.wait_until(&dummy_latch);
 
     // Normal termination, do not abort.
     mem::forget(abort_guard);
