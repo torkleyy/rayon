@@ -34,7 +34,6 @@ impl Epoch {
     #[cold]
     fn awaken(&self) {
         let data = self.data.lock().unwrap();
-        self.state.store(AWAKE, Ordering::Relaxed);
         self.work_available.notify_all();
     }
 
