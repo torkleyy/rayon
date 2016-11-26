@@ -293,8 +293,8 @@ impl WorkerThread {
 
     #[inline]
     pub unsafe fn push(&self, job: JobRef) {
-        self.notify_work_pushed();
         self.worker.push(job);
+        self.notify_work_pushed();
     }
 
     /// Pop `job` from top of stack, returning `false` if it has been
