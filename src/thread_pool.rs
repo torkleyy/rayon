@@ -7,11 +7,13 @@ use latch::{Latch, LockLatch};
 use log::Event::*;
 use rand::{self, Rng};
 use std::cell::{Cell, UnsafeCell};
+use std::cmp;
 use std::sync::{Arc, Condvar, Mutex, Once, ONCE_INIT};
 use std::process;
 use std::thread;
 use std::collections::VecDeque;
 use std::mem;
+use std::time::Duration;
 use unwind;
 use util::leak;
 use num_cpus;
@@ -283,6 +285,7 @@ impl WorkerThread {
 
     #[inline]
     pub unsafe fn push(&self, job: JobRef) {
+        self.notify_work_pushed();
         self.worker.push(job);
     }
 
@@ -311,10 +314,14 @@ impl WorkerThread {
         // memory accesses, which would be *very bad*
         let guard = unwind::finally((), |_| process::exit(2222));
 
+        let mut yields = 0;
         while !latch.probe() {
             // if not, try to steal some more
             if !self.pop_or_steal_and_execute() {
-                thread::yield_now();
+                self.yield_for_work(yields);
+                yields = yields.saturating_add(1);
+            } else {
+                yields = 0;
             }
         }
 
@@ -373,6 +380,38 @@ impl WorkerThread {
                 }
             })
             .next()
+    }
+
+    /// Invoked when work is pushed on the deque.
+    #[inline]
+    fn notify_work_pushed(&self) {
+    }
+
+    /// Invoked from the `wait_until()` loop when no work has been
+    /// found. The counter indicates the number of loop iterations in
+    /// which nothing has been found.
+    #[inline]
+    fn yield_for_work(&self, yields: usize) {
+        // Exponential backoff to 100ms.
+        const SLEEP_MS: &'static [u64] = &[
+            0,
+            0,
+            0,
+            10,
+            20,
+            40,
+            80,
+            100,
+            200,
+            400,
+        ];
+        let index = cmp::min(SLEEP_MS.len() - 1, yields);
+        let sleep_ms = SLEEP_MS[index];
+        if sleep_ms == 0 {
+            thread::yield_now();
+        } else {
+            thread::sleep(Duration::from_millis(sleep_ms));
+        }
     }
 }
 
