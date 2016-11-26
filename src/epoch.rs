@@ -26,7 +26,7 @@ impl Epoch {
     #[inline]
     pub fn tickle(&self) {
         let old_state = self.state.swap(AWAKE, Ordering::Relaxed);
-        if old_state != AWAKE {
+        if old_state == ASLEEP {
             self.awaken();
         }
     }
@@ -38,22 +38,33 @@ impl Epoch {
         self.work_available.notify_all();
     }
 
+    pub fn get_sleepy(&self) {
+        // If the registry is AWAKE, make it SLEEPY. Otherwise, if
+        // must be SLEEPY or ASLEEP already, so we can leave the state
+        // the same.
+        self.state.compare_exchange(AWAKE, SLEEPY, Ordering::Relaxed, Ordering::Relaxed);
+    }
+
     pub fn sleep(&self) {
-        let old_state = self.state.swap(SLEEPY, Ordering::Relaxed);
-        let mut data = self.data.lock().unwrap();
-        loop {
-            let state = self.state.load(Ordering::Relaxed);
-            if state == AWAKE {
-                return;
-            }
-            match self.state.compare_exchange_weak(state,
-                                                   ASLEEP,
-                                                   Ordering::Relaxed,
-                                                   Ordering::Relaxed) {
-                Ok(_) => {
-                    data = self.work_available.wait(data).unwrap();
+        if self.state.load(Ordering::Relaxed) == AWAKE {
+            // since we got sleepy, somebody woke us up
+            return;
+        } else {
+            let mut data = self.data.lock().unwrap();
+            loop {
+                match self.state.compare_exchange_weak(SLEEPY, ASLEEP, Ordering::Relaxed, Ordering::Relaxed) {
+                    Err(AWAKE) => {
+                        // since we got sleepy, somebody woke us up
+                        return;
+                    }
+                    Ok(_) | Err(ASLEEP) => {
+                        // registry is now asleep; wait to be awoken
+                        data = self.work_available.wait(data).unwrap();
+                    }
+                    Err(_) => {
+                        // spurious failure
+                    }
                 }
-                Err(_) => { }
             }
         }
     }

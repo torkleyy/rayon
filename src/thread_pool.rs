@@ -401,7 +401,9 @@ impl WorkerThread {
     /// which nothing has been found.
     #[inline]
     fn yield_for_work(&self, yields: usize) {
-        if yields > 22 {
+        if yields == 22 {
+            self.registry.epoch.get_sleepy();
+        } else if yields > 22 {
             self.registry.epoch.sleep();
         }
     }
