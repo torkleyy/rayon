@@ -191,7 +191,7 @@ impl ThreadInfo {
 
 pub struct WorkerThread {
     worker: Worker<JobRef>,
-    stealers: Vec<Stealer<JobRef>>,
+    stealers: Vec<(usize, Stealer<JobRef>)>,
     index: usize,
 
     /// A weak random number generator.
@@ -256,6 +256,7 @@ impl WorkerThread {
     /// stealing tasks as necessary.
     #[inline]
     pub unsafe fn wait_until<L: Latch>(&self, latch: &L) {
+        log!(WaitUntil { worker: self.index });
         if !latch.probe() {
             self.wait_until_cold(latch);
         }
@@ -282,6 +283,7 @@ impl WorkerThread {
             }
         }
 
+        log!(LatchSet { worker: self.index });
         mem::forget(abort_guard); // successful execution, do not abort
     }
 
@@ -329,11 +331,16 @@ impl WorkerThread {
         let (lo, hi) = self.stealers.split_at(start as usize);
         hi.iter()
             .chain(lo)
-            .filter_map(|stealer| {
-                match stealer.steal() {
-                    Stolen::Empty => None,
-                    Stolen::Abort => None, // loop?
-                    Stolen::Data(v) => Some(v),
+            .filter_map(|&(victim_index, ref stealer)| {
+                loop {
+                    match stealer.steal() {
+                        Stolen::Empty => return None,
+                        Stolen::Abort => (), // retry
+                        Stolen::Data(v) => {
+                            log!(StoleWork { worker: self.index, victim: victim_index });
+                            return Some(v);
+                        }
+                    }
                 }
             })
             .next()
@@ -372,7 +379,7 @@ unsafe fn main_loop(worker: Worker<JobRef>, registry: Arc<Registry>, index: usiz
         .iter()
         .enumerate()
         .filter(|&(i, _)| i != index)
-        .map(|(_, ti)| ti.stealer.clone())
+        .map(|(i, ti)| (i, ti.stealer.clone()))
         .collect::<Vec<_>>();
 
     assert!(stealers.len() < ::std::u32::MAX as usize,
