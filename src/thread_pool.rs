@@ -325,11 +325,10 @@ impl WorkerThread {
         let mut yields = 0;
         while !latch.probe() {
             // if not, try to steal some more
-            if !self.pop_or_steal_and_execute() {
-                self.yield_for_work(yields);
-                yields = yields.saturating_add(1);
-            } else {
+            if self.pop_or_steal_and_execute() {
                 yields = 0;
+            } else {
+                yields = self.yield_for_work(yields);
             }
         }
 
@@ -400,11 +399,18 @@ impl WorkerThread {
     /// found. The counter indicates the number of loop iterations in
     /// which nothing has been found.
     #[inline]
-    fn yield_for_work(&self, yields: usize) {
-        if yields == 22 {
+    fn yield_for_work(&self, yields: usize) -> usize{
+        const N: usize = 22;
+
+        if yields < N {
+            thread::yield_now();
+            yields + 1
+        } else if yields == N {
             self.registry.epoch.get_sleepy();
-        } else if yields > 22 {
+            yields + 1
+        } else {
             self.registry.epoch.sleep();
+            0
         }
     }
 }
