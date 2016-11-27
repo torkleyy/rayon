@@ -12,7 +12,7 @@ pub struct Epoch {
 
 const AWAKE: usize = 0;
 const SLEEPY: usize = 1;
-const ASLEEP: usize = 1;
+const ASLEEP: usize = 2;
 
 impl Epoch {
     pub fn new() -> Epoch {
