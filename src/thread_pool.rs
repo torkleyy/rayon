@@ -291,11 +291,20 @@ impl WorkerThread {
     /// return true. Else return false.
     unsafe fn pop_or_steal_and_execute(&self) -> bool {
         if let Some(job) = self.pop_or_steal() {
-            job.execute(JobMode::Execute);
+            self.execute(job);
             true
         } else {
             false
         }
+    }
+
+    pub unsafe fn execute(&self, job: JobRef) {
+        job.execute(JobMode::Execute);
+
+        // NB: Executing this job may have flipped a latch that allows
+        // someone sleeping to make progress, so tickle the threadpool
+        // to wake everybody up.
+        self.registry.epoch.tickle(self.index);
     }
 
     /// Try to pop a job locally; if none is found, try to steal a job.

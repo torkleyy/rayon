@@ -1,7 +1,7 @@
 use latch::{Latch, LockLatch, SpinLatch};
 #[allow(unused_imports)]
 use log::Event::*;
-use job::{JobMode, StackJob};
+use job::StackJob;
 use thread_pool::{self, WorkerThread};
 use std::mem;
 use unwind;
@@ -82,7 +82,7 @@ pub fn join<A, B, RA, RB>(oper_a: A, oper_b: B) -> (RA, RB)
                     return (result_a, result_b);
                 } else {
                     log!(PoppedJob { worker: worker_thread.index() });
-                    job.execute(JobMode::Execute);
+                    worker_thread.execute(job);
                 }
             } else {
                 // Local deque is empty. Time to steal from other
