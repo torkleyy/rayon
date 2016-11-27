@@ -77,10 +77,11 @@ pub fn join<A, B, RA, RB>(oper_a: A, oper_b: B) -> (RA, RB)
                     // Found it! Let's run it.
                     //
                     // Note that this could panic, but it's ok if we unwind here.
-                    log!(PoppedJob { worker: worker_thread.index() });
+                    log!(PoppedRhs { worker: worker_thread.index() });
                     let result_b = job_b.run_inline();
                     return (result_a, result_b);
                 } else {
+                    log!(PoppedJob { worker: worker_thread.index() });
                     job.execute(JobMode::Execute);
                 }
             } else {

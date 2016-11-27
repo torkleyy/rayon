@@ -8,13 +8,11 @@ use latch::{Latch, SpinLatch, LockLatch};
 use log::Event::*;
 use rand::{self, Rng};
 use std::cell::{Cell, UnsafeCell};
-use std::cmp;
 use std::sync::{Arc, Condvar, Mutex, Once, ONCE_INIT};
-use std::process;
 use std::thread;
 use std::collections::VecDeque;
 use std::mem;
-use std::time::Duration;
+use std::usize;
 use unwind;
 use util::leak;
 use num_cpus;
@@ -30,7 +28,6 @@ pub struct Registry {
 
 struct RegistryState {
     terminate: bool,
-    threads_at_work: usize,
     injected_jobs: VecDeque<JobRef>,
 }
 
@@ -62,12 +59,6 @@ pub fn get_registry_with_config(config: Configuration) -> &'static Registry {
 unsafe fn init_registry(config: Configuration) {
     let registry = leak(Arc::new(Registry::new(config.num_threads())));
     THE_REGISTRY = Some(registry);
-}
-
-enum Work {
-    None,
-    Job(JobRef),
-    Terminate,
 }
 
 impl Registry {
@@ -129,15 +120,6 @@ impl Registry {
     /// So long as all of the worker threads are hanging out in their
     /// top-level loop, there is no work to be done.
 
-    fn start_working(&self, index: usize) {
-        log!(StartWorking { index: index });
-        {
-            let mut state = self.state.lock().unwrap();
-            state.threads_at_work += 1;
-        }
-        self.work_available.notify_all();
-    }
-
     pub unsafe fn inject(&self, injected_jobs: &[JobRef]) {
         log!(InjectJobs { count: injected_jobs.len() });
         {
@@ -152,50 +134,12 @@ impl Registry {
 
             state.injected_jobs.extend(injected_jobs);
         }
-        self.epoch.tickle();
+        self.epoch.tickle(usize::MAX);
     }
 
     fn pop_injected_job(&self) -> Option<JobRef> {
         let mut state = self.state.lock().unwrap();
         state.injected_jobs.pop_front()
-    }
-
-    fn wait_for_work(&self, _worker: usize, was_active: bool) -> Work {
-        log!(WaitForWork {
-            worker: _worker,
-            was_active: was_active,
-        });
-
-        let mut state = self.state.lock().unwrap();
-
-        if was_active {
-            state.threads_at_work -= 1;
-        }
-
-        loop {
-            // Check if we need to terminate.
-            if state.terminate {
-                return Work::Terminate;
-            }
-
-            // Otherwise, if anything was injected from outside,
-            // return that.  Note that this gives preference to
-            // injected items over stealing from others, which is a
-            // bit dubious, but then so is the opposite.
-            if let Some(job) = state.injected_jobs.pop_front() {
-                state.threads_at_work += 1;
-                self.work_available.notify_all();
-                return Work::Job(job);
-            }
-
-            // If any of the threads are running a job, we should spin
-            // up, since they may generate subworkitems.
-            if state.threads_at_work > 0 {
-                return Work::None;
-            }
-
-            state = self.work_available.wait(state).unwrap();
-        }
     }
 
     pub fn terminate(&self) {
@@ -215,7 +159,6 @@ impl Registry {
 impl RegistryState {
     pub fn new() -> RegistryState {
         RegistryState {
-            threads_at_work: 0,
             injected_jobs: VecDeque::new(),
             terminate: false,
         }
@@ -326,8 +269,10 @@ impl WorkerThread {
         while !latch.probe() {
             // if not, try to steal some more
             if self.pop_or_steal_and_execute() {
+                log!(FoundWork { worker: self.index });
                 yields = 0;
             } else {
+                log!(DidNotFindWork { worker: self.index, yields: yields });
                 yields = self.yield_for_work(yields);
             }
         }
@@ -392,24 +337,24 @@ impl WorkerThread {
     /// Invoked when work is pushed on the deque.
     #[inline]
     fn notify_work_pushed(&self) {
-        self.registry.epoch.tickle();
+        self.registry.epoch.tickle(self.index);
     }
 
     /// Invoked from the `wait_until()` loop when no work has been
     /// found. The counter indicates the number of loop iterations in
     /// which nothing has been found.
     #[inline]
-    fn yield_for_work(&self, yields: usize) -> usize{
+    fn yield_for_work(&self, yields: usize) -> usize {
         const N: usize = 22;
 
         if yields < N {
             thread::yield_now();
             yields + 1
         } else if yields == N {
-            self.registry.epoch.get_sleepy();
+            self.registry.epoch.get_sleepy(self.index);
             yields + 1
         } else {
-            self.registry.epoch.sleep();
+            self.registry.epoch.sleep(self.index);
             0
         }
     }

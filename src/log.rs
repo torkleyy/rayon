@@ -4,12 +4,16 @@ use std::sync::atomic::{AtomicUsize, ATOMIC_USIZE_INIT};
 
 #[derive(Debug)]
 pub enum Event {
-    StartWorking { index: usize },
+    Tickle { worker: usize, old_state: usize },
+    GetSleepy { worker: usize, result: Result<usize, usize> },
+    GotAwoken { worker: usize },
+    FellAsleep { worker: usize },
+    FoundWork { worker: usize },
+    DidNotFindWork { worker: usize, yields: usize },
     InjectJobs { count: usize },
-    WaitForWork { worker: usize, was_active: bool },
-    StoleWork { worker: usize },
     Join { worker: usize },
     PoppedJob { worker: usize },
+    PoppedRhs { worker: usize },
     LostJob { worker: usize },
 }
 
