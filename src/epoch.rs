@@ -57,8 +57,11 @@ impl Epoch {
                         return;
                     }
                     Ok(_) | Err(ASLEEP) => {
-                        // registry is now asleep; wait to be awoken
+                        // registry is now asleep; wait to be awoken.
+                        // Note that if there is a spurious wake-up,
+                        // that's actually ok.
                         data = self.work_available.wait(data).unwrap();
+                        return;
                     }
                     Err(_) => {
                         // spurious failure
