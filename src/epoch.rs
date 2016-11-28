@@ -112,10 +112,46 @@ impl Epoch {
     }
 
     fn sleep(&self, worker_index: usize) {
-        let data = self.data.lock().unwrap();
         loop {
             let state = self.state.load(SeqCst);
             if self.worker_is_sleepy(state, worker_index) {
+                // It is important that we hold the lock when we do
+                // the CAS. Otherwise, if we were to CAS first, then
+                // the following sequence of events could occur:
+                //
+                // - Thread A (us) sets state to SLEEPING.
+                // - Thread B sets state to AWAKE.
+                // - Thread C sets state to SLEEPY(C).
+                // - Thread C sets state to SLEEPING.
+                // - Thread A reawakens, acquires lock, and goes to sleep.
+                //
+                // Now we missed the wake-up from thread B! But since
+                // we have the lock when we set the state to sleeping,
+                // that cannot happen. Note that the swap `tickle()`
+                // is not part of the lock, though, so let's play that
+                // out:
+                //
+                // # Scenario 1
+                //
+                // - A loads state and see SLEEPY(A)
+                // - B swaps to AWAKE.
+                // - A locks, fails CAS
+                //
+                // # Scenario 2
+                //
+                // - A loads state and see SLEEPY(A)
+                // - A locks, performs CAS
+                // - B swaps to AWAKE.
+                // - A waits (releasing lock)
+                // - B locks, notifies
+                //
+                // In general, acquiring the lock inside the loop
+                // seems like it could lead to bad performance, but
+                // actually it should be ok. This is because the only
+                // reason for the `compare_exchange` to fail is if an
+                // awaken comes, in which case the next cycle around
+                // the loop will just return.
+                let data = self.data.lock().unwrap();
                 if self.state.compare_exchange(state, SLEEPING, SeqCst, SeqCst).is_ok() {
                     // Don't do this in a loop. If we do it in a loop, we need
                     // some way to distinguish the ABA scenario where the pool
