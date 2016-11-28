@@ -95,7 +95,6 @@ impl Epoch {
     }
 
     fn get_sleepy(&self, worker_index: usize) -> bool {
-        let _data = self.data.lock().unwrap();
         loop {
             let state = self.state.load(SeqCst);
             log!(GetSleepy { worker: worker_index, state: state });
