@@ -242,7 +242,7 @@ impl WorkerThread {
     #[inline]
     pub unsafe fn push(&self, job: JobRef) {
         self.worker.push(job);
-        self.notify_work_pushed();
+        self.registry.epoch.tickle(self.index);
     }
 
     /// Pop `job` from top of stack, returning `false` if it has been
@@ -276,10 +276,10 @@ impl WorkerThread {
             // if not, try to steal some more
             if self.pop_or_steal_and_execute() {
                 log!(FoundWork { worker: self.index });
-                yields = 0;
+                yields = self.registry.epoch.work_found(self.index, yields);
             } else {
                 log!(DidNotFindWork { worker: self.index, yields: yields });
-                yields = self.yield_for_work(yields);
+                yields = self.registry.epoch.no_work_found(self.index, yields);
             }
         }
 
@@ -313,7 +313,15 @@ impl WorkerThread {
     /// code elsewhere never pops indiscriminantly, but always with
     /// some notion of the current stack depth.
     unsafe fn pop_or_steal(&self) -> Option<JobRef> {
-        self.pop().or_else(|| self.steal()).or_else(|| self.registry.pop_injected_job())
+        self.pop()
+            .or_else(|| self.steal())
+            .or_else(|| match self.registry.pop_injected_job() {
+                None => None,
+                Some(job) => {
+                    log!(UninjectedWork { worker: self.index });
+                    Some(job)
+                }
+            })
     }
 
     /// Try to steal a single job and return it.
@@ -353,31 +361,6 @@ impl WorkerThread {
                 }
             })
             .next()
-    }
-
-    /// Invoked when work is pushed on the deque.
-    #[inline]
-    fn notify_work_pushed(&self) {
-        self.registry.epoch.tickle(self.index);
-    }
-
-    /// Invoked from the `wait_until()` loop when no work has been
-    /// found. The counter indicates the number of loop iterations in
-    /// which nothing has been found.
-    #[inline]
-    fn yield_for_work(&self, yields: usize) -> usize {
-        const N: usize = 22;
-
-        if yields < N {
-            thread::yield_now();
-            yields + 1
-        } else if yields == N {
-            self.registry.epoch.get_sleepy(self.index);
-            yields + 1
-        } else {
-            self.registry.epoch.sleep(self.index);
-            0
-        }
     }
 }
 

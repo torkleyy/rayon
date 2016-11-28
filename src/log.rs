@@ -5,11 +5,13 @@ use std::sync::atomic::{AtomicUsize, ATOMIC_USIZE_INIT};
 #[derive(Debug)]
 pub enum Event {
     Tickle { worker: usize, old_state: usize },
-    GetSleepy { worker: usize, result: Result<usize, usize> },
+    GetSleepy { worker: usize, state: usize },
     GotAwoken { worker: usize },
     FellAsleep { worker: usize },
+    GotInterrupted { worker: usize },
     FoundWork { worker: usize },
     StoleWork { worker: usize, victim: usize },
+    UninjectedWork { worker: usize },
     WaitUntil { worker: usize },
     LatchSet { worker: usize },
     DidNotFindWork { worker: usize, yields: usize },
