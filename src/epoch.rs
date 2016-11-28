@@ -102,10 +102,10 @@ impl Epoch {
 
     #[cold]
     fn tickle_cold(&self, worker_index: usize) {
-        let _data = self.data.lock().unwrap();
         let old_state = State::new(self.state.swap(AWAKE, SeqCst));
         log!(Tickle { worker: worker_index, old_state: old_state.value });
         if old_state.anyone_sleeping() {
+            let _data = self.data.lock().unwrap();
             self.tickle.notify_all();
         }
     }
