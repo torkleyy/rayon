@@ -1,5 +1,5 @@
 use log::Event::*;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::AtomicUsize;
 use std::sync::{Condvar, Mutex};
 use std::thread;
 use std::usize;
@@ -21,38 +21,10 @@ pub struct Epoch {
     tickle: Condvar,
 }
 
-#[derive(Copy, Clone)]
-struct State {
-    value: usize
-}
-
 const AWAKE: usize = 0;
 const SLEEPING: usize = 1;
 
-impl State {
-    fn new(f: usize) -> Self {
-        State { value: f }
-    }
-
-    fn anyone_sleeping(self) -> bool {
-        (self.value & SLEEPING) != 0
-    }
-
-    fn anyone_sleepy(self) -> bool {
-        (self.value >> 1) != 0
-    }
-
-    fn worker_is_sleepy(self, worker_id: usize) -> bool {
-        (self.value >> 1) == (worker_id + 1)
-    }
-
-    fn with_worker(self, worker_id: usize) -> State {
-        let value = (worker_id + 1) << 1;
-        let value = value + (self.value & 0x1);
-        State { value: value }
-    }
-}
-
+// number of rounds to try searching before we get sleepy
 const N: usize = 0;
 
 impl Epoch {
@@ -64,9 +36,21 @@ impl Epoch {
         }
     }
 
-    #[inline]
-    fn load_state(&self, o: Ordering) -> State {
-        State::new(self.state.load(o))
+    fn anyone_sleeping(&self, state: usize) -> bool {
+        state & SLEEPING != 0
+    }
+
+    fn any_worker_is_sleepy(&self, state: usize) -> bool {
+        (state >> 1) != 0
+    }
+
+    fn worker_is_sleepy(&self, state: usize, worker_index: usize) -> bool {
+        (state >> 1) == (worker_index + 1)
+    }
+
+    fn with_sleepy_worker(&self, state: usize, worker_index: usize) -> usize {
+        debug_assert!(state == AWAKE || state == SLEEPING);
+        ((worker_index + 1) << 1) + state
     }
 
     pub fn work_found(&self, worker_index: usize, yields: usize) -> usize {
@@ -94,17 +78,17 @@ impl Epoch {
     }
 
     pub fn tickle(&self, worker_index: usize) {
-        let old_state = self.load_state(SeqCst);
-        if old_state.value != AWAKE {
+        let old_state = self.state.load(SeqCst);
+        if old_state != AWAKE {
             self.tickle_cold(worker_index);
         }
     }
 
     #[cold]
     fn tickle_cold(&self, worker_index: usize) {
-        let old_state = State::new(self.state.swap(AWAKE, SeqCst));
-        log!(Tickle { worker: worker_index, old_state: old_state.value });
-        if old_state.anyone_sleeping() {
+        let old_state = self.state.swap(AWAKE, SeqCst);
+        log!(Tickle { worker: worker_index, old_state: old_state });
+        if self.anyone_sleeping(old_state) {
             let _data = self.data.lock().unwrap();
             self.tickle.notify_all();
         }
@@ -112,23 +96,23 @@ impl Epoch {
 
     fn get_sleepy(&self, worker_index: usize) -> bool {
         let _data = self.data.lock().unwrap();
-        let state = self.load_state(SeqCst);
-        log!(GetSleepy { worker: worker_index, state: state.value });
-        if state.anyone_sleepy() {
+        let state = self.state.load(SeqCst);
+        log!(GetSleepy { worker: worker_index, state: state });
+        if self.any_worker_is_sleepy(state) {
             // somebody else is already sleepy, so we'll just wait our turn
             false
         } else {
             // make ourselves the sleepy one
-            let new_state = state.with_worker(worker_index);
-            self.state.store(new_state.value, SeqCst);
+            let new_state = self.with_sleepy_worker(state, worker_index);
+            self.state.store(new_state, SeqCst);
             true
         }
     }
 
     fn sleep(&self, worker_index: usize) {
         let data = self.data.lock().unwrap();
-        let state = self.load_state(SeqCst);
-        if state.worker_is_sleepy(worker_index) {
+        let state = self.state.load(SeqCst);
+        if self.worker_is_sleepy(state, worker_index) {
             self.state.store(SLEEPING, SeqCst);
 
             // Don't do this in a loop. If we do it in a loop, we need
