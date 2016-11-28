@@ -96,36 +96,43 @@ impl Epoch {
 
     fn get_sleepy(&self, worker_index: usize) -> bool {
         let _data = self.data.lock().unwrap();
-        let state = self.state.load(SeqCst);
-        log!(GetSleepy { worker: worker_index, state: state });
-        if self.any_worker_is_sleepy(state) {
-            // somebody else is already sleepy, so we'll just wait our turn
-            false
-        } else {
-            // make ourselves the sleepy one
-            let new_state = self.with_sleepy_worker(state, worker_index);
-            self.state.store(new_state, SeqCst);
-            true
+        loop {
+            let state = self.state.load(SeqCst);
+            log!(GetSleepy { worker: worker_index, state: state });
+            if self.any_worker_is_sleepy(state) {
+                // somebody else is already sleepy, so we'll just wait our turn
+                return false;
+            } else {
+                // make ourselves the sleepy one
+                let new_state = self.with_sleepy_worker(state, worker_index);
+                if self.state.compare_exchange(state, new_state, SeqCst, SeqCst).is_ok() {
+                    return true;
+                }
+            }
         }
     }
 
     fn sleep(&self, worker_index: usize) {
         let data = self.data.lock().unwrap();
-        let state = self.state.load(SeqCst);
-        if self.worker_is_sleepy(state, worker_index) {
-            self.state.store(SLEEPING, SeqCst);
-
-            // Don't do this in a loop. If we do it in a loop, we need
-            // some way to distinguish the ABA scenario where the pool
-            // was awoken but before we could process it somebody went
-            // to sleep. Note that if we get a false wakeup it's not a
-            // problem for us, we'll just loop around and maybe get
-            // sleepy again.
-            log!(FellAsleep { worker: worker_index });
-            let _ = self.tickle.wait(data).unwrap();
-            log!(GotAwoken { worker: worker_index });
-        } else {
-            log!(GotInterrupted { worker: worker_index });
+        loop {
+            let state = self.state.load(SeqCst);
+            if self.worker_is_sleepy(state, worker_index) {
+                if self.state.compare_exchange(state, SLEEPING, SeqCst, SeqCst).is_ok() {
+                    // Don't do this in a loop. If we do it in a loop, we need
+                    // some way to distinguish the ABA scenario where the pool
+                    // was awoken but before we could process it somebody went
+                    // to sleep. Note that if we get a false wakeup it's not a
+                    // problem for us, we'll just loop around and maybe get
+                    // sleepy again.
+                    log!(FellAsleep { worker: worker_index });
+                    let _ = self.tickle.wait(data).unwrap();
+                    log!(GotAwoken { worker: worker_index });
+                    return;
+                }
+            } else {
+                log!(GotInterrupted { worker: worker_index });
+                return;
+            }
         }
     }
 }
