@@ -3,7 +3,7 @@ use std::sync::atomic::AtomicUsize;
 use std::sync::{Condvar, Mutex};
 use std::thread;
 use std::usize;
-use std::sync::atomic::Ordering::SeqCst;
+use std::sync::atomic::Ordering::*;
 
 // SUBTLE CORRECTNESS POINTS
 //
@@ -78,7 +78,7 @@ impl Epoch {
     }
 
     pub fn tickle(&self, worker_index: usize) {
-        let old_state = self.state.load(SeqCst);
+        let old_state = self.state.load(Acquire);
         if old_state != AWAKE {
             self.tickle_cold(worker_index);
         }
