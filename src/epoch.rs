@@ -25,7 +25,7 @@ const AWAKE: usize = 0;
 const SLEEPING: usize = 1;
 
 // number of rounds to try searching before we get sleepy
-const N: usize = 0;
+const N: usize = 32;
 
 impl Epoch {
     pub fn new() -> Epoch {
