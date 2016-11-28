@@ -1,9 +1,9 @@
 use log::Event::*;
-// use std::sync::atomic::AtomicUsize;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Condvar, Mutex};
 use std::thread;
 use std::usize;
-// use std::sync::atomic::Ordering::SeqCst as R;
+use std::sync::atomic::Ordering::SeqCst;
 
 // SUBTLE CORRECTNESS POINTS
 //
@@ -16,7 +16,8 @@ use std::usize;
 /// want worker threads to start to spin down when there is nothing to
 /// do, but to spin up quickly.
 pub struct Epoch {
-    data: Mutex<State>,
+    state: AtomicUsize,
+    data: Mutex<()>,
     tickle: Condvar,
 }
 
@@ -25,21 +26,16 @@ struct State {
     value: usize
 }
 
+const AWAKE: usize = 0;
+const SLEEPING: usize = 1;
+
 impl State {
-    fn awake() -> Self {
-        State { value: 0 }
-    }
-
-    fn sleeping() -> Self {
-        State { value: 1 }
-    }
-
-    fn from_usize(f: usize) -> Self {
+    fn new(f: usize) -> Self {
         State { value: f }
     }
 
     fn anyone_sleeping(self) -> bool {
-        (self.value & 1) != 0
+        (self.value & SLEEPING) != 0
     }
 
     fn anyone_sleepy(self) -> bool {
@@ -62,9 +58,15 @@ const N: usize = 0;
 impl Epoch {
     pub fn new() -> Epoch {
         Epoch {
-            data: Mutex::new(State::awake()),
+            state: AtomicUsize::new(AWAKE),
+            data: Mutex::new(()),
             tickle: Condvar::new(),
         }
+    }
+
+    #[inline]
+    fn load_state(&self, o: Ordering) -> State {
+        State::new(self.state.load(o))
     }
 
     pub fn work_found(&self, worker_index: usize, yields: usize) -> usize {
@@ -92,34 +94,35 @@ impl Epoch {
     }
 
     pub fn tickle(&self, worker_index: usize) {
-        let mut data = self.data.lock().unwrap();
-        let old_state = *data;
+        let data = self.data.lock().unwrap();
+        let old_state = self.load_state(SeqCst);
         log!(Tickle { worker: worker_index, old_state: old_state.value });
-        *data = State::awake();
+        self.state.store(AWAKE, SeqCst);
         if old_state.anyone_sleeping() {
             self.tickle.notify_all();
         }
     }
 
     fn get_sleepy(&self, worker_index: usize) -> bool {
-        let mut data = self.data.lock().unwrap();
-        let state = *data;
+        let data = self.data.lock().unwrap();
+        let state = self.load_state(SeqCst);
         log!(GetSleepy { worker: worker_index, state: state.value });
         if state.anyone_sleepy() {
             // somebody else is already sleepy, so we'll just wait our turn
             false
         } else {
             // make ourselves the sleepy one
-            *data = state.with_worker(worker_index);
+            let new_state = state.with_worker(worker_index);
+            self.state.store(new_state.value, SeqCst);
             true
         }
     }
 
     fn sleep(&self, worker_index: usize) {
-        let mut data = self.data.lock().unwrap();
-        let state = *data;
+        let data = self.data.lock().unwrap();
+        let state = self.load_state(SeqCst);
         if state.worker_is_sleepy(worker_index) {
-            *data = State::sleeping();
+            self.state.store(SLEEPING, SeqCst);
 
             // Don't do this in a loop. If we do it in a loop, we need
             // some way to distinguish the ABA scenario where the pool
