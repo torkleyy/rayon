@@ -94,17 +94,24 @@ impl Epoch {
     }
 
     pub fn tickle(&self, worker_index: usize) {
-        let data = self.data.lock().unwrap();
         let old_state = self.load_state(SeqCst);
+        if old_state.value != AWAKE {
+            self.tickle_cold(worker_index);
+        }
+    }
+
+    #[cold]
+    fn tickle_cold(&self, worker_index: usize) {
+        let _data = self.data.lock().unwrap();
+        let old_state = State::new(self.state.swap(AWAKE, SeqCst));
         log!(Tickle { worker: worker_index, old_state: old_state.value });
-        self.state.store(AWAKE, SeqCst);
         if old_state.anyone_sleeping() {
             self.tickle.notify_all();
         }
     }
 
     fn get_sleepy(&self, worker_index: usize) -> bool {
-        let data = self.data.lock().unwrap();
+        let _data = self.data.lock().unwrap();
         let state = self.load_state(SeqCst);
         log!(GetSleepy { worker: worker_index, state: state.value });
         if state.anyone_sleepy() {
