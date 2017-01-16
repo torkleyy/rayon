@@ -1,4 +1,4 @@
-use Configuration;
+use {Configuration, PanicHandler};
 use deque;
 use deque::{Worker, Stealer, Stolen};
 use job::{JobRef, StackJob};
