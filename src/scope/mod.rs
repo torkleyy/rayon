@@ -1,6 +1,5 @@
-use future::{self, RayonFuture};
 #[cfg(feature = "unstable")]
-use futures::Future;
+use future::{self, Future, RayonFuture};
 use latch::{Latch, CountLatch};
 use log::Event::*;
 use job::HeapJob;
@@ -288,9 +287,7 @@ impl<'scope> Scope<'scope> {
         // valid until the scope ends.
         let future_scope = unsafe { ScopeFutureScope::new(self) };
 
-        // We assert that we have the future `F` type will remain
-        // valid until `job_completed_latch` is fully set
-        return unsafe { future::new_rayon_future(future, future_scope) };
+        return future::new_rayon_future(future, future_scope);
 
         struct ScopeFutureScope<'scope> {
             scope: *const Scope<'scope>
