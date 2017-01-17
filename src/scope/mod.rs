@@ -1,3 +1,4 @@
+use future::{self, RayonFuture};
 #[cfg(feature = "unstable")]
 use futures::Future;
 use latch::{Latch, CountLatch};
@@ -11,11 +12,6 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicPtr, Ordering};
 use registry::{in_worker, Registry, WorkerThread};
 use unwind;
-
-#[cfg(feature = "unstable")]
-mod future;
-#[cfg(feature = "unstable")]
-use self::future::RayonFuture;
 
 #[cfg(test)]
 mod test;
