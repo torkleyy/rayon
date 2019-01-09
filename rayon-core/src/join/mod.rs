@@ -115,7 +115,11 @@ where
     RA: Send,
     RB: Send,
 {
-    registry::in_worker(|worker_thread, injected| unsafe {
+    #[cfg(target_arch = "wasm32")]
+    let r = (oper_a(FnContext::new(false)), oper_b(FnContext::new(false)));
+
+    #[cfg(not(target_arch = "wasm32"))]
+    let r = registry::in_worker(|worker_thread, injected| unsafe {
         log!(Join {
             worker: worker_thread.index()
         });
@@ -172,7 +176,9 @@ where
         }
 
         return (result_a, job_b.into_result());
-    })
+    });
+
+    r
 }
 
 /// If job A panics, we still cannot return until we are sure that job
